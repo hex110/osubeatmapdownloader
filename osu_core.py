@@ -90,6 +90,7 @@ def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0):
             seen.add(sid)
             out.append({"id": sid, "title": s.get("title", ""), "artist": s.get("artist", ""),
                         "cover": (s.get("covers") or {}).get("list", ""),
+                        "creator": s.get("creator", ""),
                         # most_played is ordered by play count and lists one entry per difficulty,
                         # so this is the plays on the map's most played difficulty
                         "plays": item.get("count", 0) if kind == "most_played" else 0})
@@ -244,31 +245,56 @@ def find_lazer_data(custom=""):
     return None
 
 
+def _meta(blob, field):
+    m = re.search(rb"^" + field + rb"\s*:(.*)$", blob, re.M)
+    return m.group(1).decode("utf-8", "replace").strip() if m else ""
+
+
+def name_key(artist, title, creator):
+    """The fallback identity of a beatmap set: who made it, of what, by whom.
+
+    Used only for maps too old to carry an ID. Creator matters: there are a dozen different
+    "The Quick Brown Fox - The Big Black" sets by different mappers, and matching on artist
+    and title alone would treat them all as the same map.
+    """
+    norm = lambda v: re.sub(r"\s+", " ", (v or "")).strip().casefold()
+    return (norm(artist), norm(title), norm(creator))
+
+
 def scan_lazer_library(data_dir):
-    """Beatmapset IDs already imported into osu!lazer.
+    """What's already in osu!lazer, as (beatmapset IDs, name keys for maps that have none).
 
     lazer keeps every file under 'files/' named by its SHA-256, with the metadata in a Realm
     database that needs Realm itself to read. The .osu difficulty files are plain text
-    though, and each one names the set it belongs to, so read those instead. Scanning ~24k
-    files takes about a tenth of a second because all but the header of most is skipped.
+    though, so read those instead. Scanning ~24k files takes about a tenth of a second
+    because all but the header of most is skipped.
+
+    Beatmaps saved before osu! file format v10 predate the BeatmapSetID field, so classics
+    like The Big Black and Can't Defeat Airman can't be matched by ID at all. They fall back
+    to artist/title/creator, which is why this returns two sets rather than one.
     """
     root = Path(data_dir) / "files"
     if not root.is_dir():
         raise ValueError("That isn't an osu!lazer data folder (it has no 'files' inside).")
-    ids = set()
+    ids, keys = set(), set()
     for dirpath, _, names in os.walk(root):
         for n in names:
             try:
                 with open(os.path.join(dirpath, n), "rb") as f:
                     if not f.read(15).startswith(b"osu file format"):
                         continue
+                    f.seek(0)
                     blob = f.read(16384)  # [Metadata] is always near the top
             except OSError:
                 continue
             m = re.search(rb"^BeatmapSetID\s*:\s*(\d+)", blob, re.M)
             if m and m.group(1) != b"0":
-                ids.add(m.group(1).decode())  # unsubmitted maps use -1 and don't match
-    return ids
+                ids.add(m.group(1).decode())
+                continue
+            key = name_key(_meta(blob, b"Artist"), _meta(blob, b"Title"), _meta(blob, b"Creator"))
+            if all(key):  # a blank field would match far too much
+                keys.add(key)
+    return ids, keys
 
 
 # ---------------------------------------------------------------- desktop notification
@@ -530,6 +556,117 @@ def _sign_in(profile_dir, cancel, done):
     if not user:
         raise SignInCancelled("You're not signed in yet. Click “Sign in with osu!” to try again.")
     return user
+
+
+# ---------------------------------------------------------------- sign-in via your own browser
+#
+# Nicer than the dedicated Chrome window: osu! opens as a tab in the browser you're already
+# using, where you may well be signed in already. Afterwards the osu! session cookie is copied
+# into this app's Chrome profile, which is what the downloader actually uses.
+#
+# Firefox-family browsers keep cookie values in plain text in cookies.sqlite, so no key-ring or
+# decryption is involved. Chromium-family ones encrypt theirs, so those fall back to the
+# dedicated sign-in window.
+
+FIREFOX_FAMILY = ("~/.zen", "~/.mozilla/firefox", "~/.librewolf", "~/.floorp",
+                  "~/.waterfox", "~/.var/app/org.mozilla.firefox/.mozilla/firefox")
+
+
+def find_cookie_dbs():
+    """cookies.sqlite of every Firefox-family profile, most recently used first."""
+    found = []
+    for base in FIREFOX_FAMILY:
+        root = Path(base).expanduser()
+        if not root.is_dir():
+            continue
+        for db in root.glob("*/cookies.sqlite"):
+            if db.is_file():
+                found.append(db)
+    return sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def read_osu_cookies(db):
+    """osu! cookies from one Firefox-family cookie store, ready for Selenium.
+
+    The database is copied first: the browser is probably running, and its journal must come
+    along or we'd read a stale snapshot.
+    """
+    import shutil
+    import sqlite3
+    import tempfile
+    tmp_dir = tempfile.mkdtemp()
+    copy = Path(tmp_dir) / "cookies.sqlite"
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            part = Path(str(db) + suffix)
+            if part.exists():
+                shutil.copy2(part, str(copy) + suffix)
+        con = sqlite3.connect(copy)
+        try:
+            rows = con.execute(
+                "SELECT name, value, host, path, expiry, isSecure, isHttpOnly FROM moz_cookies "
+                "WHERE host LIKE '%ppy.sh'").fetchall()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    cookies, month = [], int(time.time()) + 30 * 86400
+    for name, value, host, path, expiry, secure, http_only in rows:
+        if not value:
+            continue
+        cookie = {"name": name, "value": value, "domain": host, "path": path or "/",
+                  "secure": bool(secure), "httpOnly": bool(http_only)}
+        # osu! sessions last about a month; some browsers store absurd expiries that
+        # Chrome refuses, so keep it within a sane range
+        if expiry:
+            cookie["expiry"] = min(int(expiry), month)
+        cookies.append(cookie)
+    return cookies
+
+
+def browser_osu_session():
+    """The osu! cookies from whichever of your browsers most recently has them."""
+    for db in find_cookie_dbs():
+        cookies = read_osu_cookies(db)
+        if any(c["name"] == "osu_session" for c in cookies):
+            return cookies, db
+    return [], None
+
+
+def import_browser_session(profile_dir, cookies):
+    """Copy cookies from your browser into this app's Chrome profile, and say who that is."""
+    if not cookies:
+        raise SignInCancelled(
+            "Couldn't find an osu! sign-in in your browser. Sign in to osu! in the tab that "
+            "opened, then click “I've signed in”.")
+    _hold_profile()
+    try:
+        driver = make_driver(profile_dir=profile_dir)
+        try:
+            driver.get(OSU)  # cookies can only be set while on their own domain
+            for cookie in cookies:
+                try:
+                    driver.add_cookie(cookie)
+                except Exception:
+                    pass  # one odd cookie shouldn't sink the whole sign-in
+            return current_user(driver)
+        finally:
+            driver.quit()  # a clean quit is what writes the cookies into the profile
+    finally:
+        PROFILE_LOCK.release()
+
+
+def open_url(url):
+    """Open a page in the user's own default browser."""
+    import subprocess
+    if os.name == "nt":
+        os.startfile(url)
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", url],
+                         env=_child_env(), start_new_session=True)
 
 
 CLICK_DOWNLOAD_JS = """

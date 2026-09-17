@@ -91,7 +91,8 @@ class State:
         self.user = cfg.get("user") if PROFILE_DIR.is_dir() else None  # confirmed on startup
         self.history = set(_load(HISTORY_FILE, []))
         self.owned = set()          # in an osu!stable Songs folder
-        self.owned_lazer = set()    # already imported into osu!lazer
+        self.owned_lazer = set()      # already imported into osu!lazer
+        self.owned_lazer_keys = set()  # ...and the pre-v10 maps that carry no ID
         self.queue = self._restore_queue()
         self.queue_saved_at = 0
         self.logs = []
@@ -99,6 +100,7 @@ class State:
         self.busy_token = None
         self.job = None
         self.signing_in = None  # (cancel, done) events while the sign-in window is open
+        self.browser_login = False  # waiting for the user to sign in in their own browser
 
     # -- persistence
     def save_config(self):
@@ -165,6 +167,14 @@ class State:
     def running(self):
         return bool(self.job and self.job.thread.is_alive())
 
+    def can_read_browser(self):
+        """Whether the user's browser stores cookies somewhere we can read (cached)."""
+        now = time.time()
+        if now - getattr(self, "_cookies_at", 0) > 30:
+            self._cookies_found = bool(core.find_cookie_dbs())
+            self._cookies_at = now
+        return self._cookies_found
+
     def lazer_data_dir(self):
         """Where osu!lazer keeps its library (cached: the UI asks on every poll)."""
         if self.lazer_dir:
@@ -176,7 +186,7 @@ class State:
         return self._lazer_found
 
     def refresh_owned(self):
-        self.owned, self.owned_lazer = set(), set()
+        self.owned, self.owned_lazer, self.owned_lazer_keys = set(), set(), set()
         if self.songs_dir:
             try:
                 self.owned = core.scan_songs_folder(self.songs_dir)
@@ -185,7 +195,7 @@ class State:
         data = self.lazer_data_dir()
         if data:
             try:
-                self.owned_lazer = core.scan_lazer_library(data)
+                self.owned_lazer, self.owned_lazer_keys = core.scan_lazer_library(data)
             except (ValueError, OSError) as e:
                 self.log("warn", f"Couldn't read your osu!lazer library: {e}")
 
@@ -195,6 +205,10 @@ class State:
             return "have", "Already in your osu! Songs folder"
         if sid in self.owned_lazer:
             return "have", "Already in osu!lazer"
+        if self.owned_lazer_keys:
+            key = core.name_key(item.get("artist"), item.get("title"), item.get("creator"))
+            if all(key) and key in self.owned_lazer_keys:
+                return "have", "Already in osu!lazer (an old map, matched by name)"
         if core.find_osz(self.folder, sid):
             return "have", "Already in the download folder"
         if sid in self.history:
@@ -217,10 +231,13 @@ class State:
             for it in self.queue:
                 counts[it["status"]] = counts.get(it["status"], 0) + 1
             return {
-                "user": self.user, "signing_in": bool(self.signing_in),
+                "user": self.user, "signing_in": bool(self.signing_in) or self.browser_login,
+                "login_mode": "browser" if self.browser_login else "chrome",
+                "can_read_browser": self.can_read_browser(),
                 "folder": self.folder, "songs_dir": self.songs_dir, "opts": self.opts,
                 "lazer_dir": self.lazer_dir, "lazer_found": self.lazer_data_dir(),
-                "lazer_count": len(self.owned_lazer),
+                "lazer_count": len(self.owned_lazer) + len(self.owned_lazer_keys),
+                "lazer_by_name": len(self.owned_lazer_keys),
                 "last_user_query": self.last_user_query, "history_count": len(self.history),
                 "clients": self.clients(),
                 "queue": self.queue, "counts": counts, "busy": self.busy,
@@ -252,9 +269,18 @@ def in_background(label, fn):
     threading.Thread(target=run, daemon=True).start()
 
 
-def act_login(_):
+def act_login(body):
+    """Sign in to osu!.
+
+    By default this uses the browser you're already reading this page in: osu! opens as a
+    normal tab, and afterwards the session is copied into the app's own Chrome profile. Pass
+    mode='chrome' for the old dedicated-window flow, which is the fallback for browsers whose
+    cookies we can't read (anything Chromium-based).
+    """
     if S.running() or S.busy:
         raise ValueError("Wait for the current task to finish first.")
+    if (body or {}).get("mode") != "chrome":
+        return _login_via_browser()
     cancel, done = threading.Event(), threading.Event()
     S.signing_in = (cancel, done)
 
@@ -272,12 +298,52 @@ def act_login(_):
     in_background("Waiting for you to sign in…", run)
 
 
+def _adopt_browser_session():
+    """Copy the osu! session out of the user's browser into our Chrome profile."""
+    def run():
+        try:
+            cookies, db = core.browser_osu_session()
+            user = core.import_browser_session(PROFILE_DIR, cookies)
+            if not user:
+                raise core.SignInCancelled(
+                    "That sign-in didn't work. Make sure you're signed in to osu! in your "
+                    "browser, then click “I've signed in” again.")
+            S.user = user
+            S.save_config()
+            S.log("ok", f"Signed in as {user['username']}, using the session from your browser"
+                        f" ({db.parent.name}).")
+        except core.SignInCancelled as e:
+            S.log("warn", str(e))
+        finally:
+            S.browser_login = False
+    in_background("Reading the sign-in from your browser…", run)
+
+
+def _login_via_browser():
+    """Open osu! in the user's own browser, or adopt a sign-in that's already there."""
+    cookies, _ = core.browser_osu_session()
+    if cookies:
+        S.log("info", "Found an osu! sign-in in your browser already.")
+        return _adopt_browser_session()
+    if not core.find_cookie_dbs():
+        S.log("warn", "Your browser keeps its cookies encrypted, so the app can't read the "
+                      "sign-in from it. Use “sign in with a separate window” instead.")
+    S.browser_login = True
+    core.open_url(core.LOGIN_URL)
+    S.log("info", "Opened osu! in your browser. Sign in there, then click “I've signed in”.")
+
+
 def act_cancel_login(_):
-    if S.signing_in:
+    if S.browser_login:
+        S.browser_login = False
+        S.log("info", "Sign-in cancelled.")
+    elif S.signing_in:
         S.signing_in[0].set()
 
 
 def act_finish_login(_):
+    if S.browser_login:
+        return _adopt_browser_session()
     if S.signing_in:
         S.signing_in[1].set()
 
@@ -527,8 +593,10 @@ def act_scan(body):
         data = S.lazer_data_dir()
         if not data:
             raise ValueError("Couldn't find your osu!lazer data folder. Set it in Folders & options.")
-        ids = core.scan_lazer_library(data)
-        S.log("ok", f"Your osu!lazer library has {len(ids)} beatmap sets.")
+        ids, keys = core.scan_lazer_library(data)
+        older = f" ({len(keys)} of them too old to carry an ID, matched by name)" if keys else ""
+        S.log("ok", f"Your osu!lazer library has {len(ids) + len(keys)} beatmap sets{older}.")
+        # only the ID-bearing ones can go into an exportable list
     else:
         if not S.songs_dir:
             raise ValueError("Pick your osu! Songs folder first.")
@@ -586,7 +654,7 @@ class Handler(BaseHTTPRequestHandler):
                 ids = sorted(core.scan_songs_folder(S.songs_dir), key=int) if S.songs_dir else []
             elif which == "lazer":
                 data = S.lazer_data_dir()
-                ids = sorted(core.scan_lazer_library(data), key=int) if data else []
+                ids = sorted(core.scan_lazer_library(data)[0], key=int) if data else []
             elif which == "history":
                 ids = sorted(S.history, key=int)
             else:

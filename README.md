@@ -47,7 +47,8 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 - **Top N, not everything.** *Most played* is ordered by play count, so *How many* gives you exactly your top N maps, with the play count shown on every row. Or set a **minimum play count** and take everything you actually played.
 - **Fast by default.** Maps come from public **beatmap mirrors**: no sign-in, no browser and no hourly limit, which is roughly **ten times faster**. Switch to official osu.ppy.sh downloads whenever you prefer.
 - **Runs invisibly.** When the website is used, Chrome works in the background (headless). No windows popping up, no need to close your browser first.
-- **Skips what you already have.** Maps in your **osu!lazer library**, your osu!stable `Songs` folder, the download folder, or downloaded in an earlier session.
+- **Skips what you already have.** Maps in your **osu!lazer library**, your osu!stable `Songs` folder, the download folder, or downloaded in an earlier session. Even maps too old to carry a beatmap ID, which are matched by artist, title and mapper.
+- **Signs in through your own browser.** No separate Chrome window to hunt for, and nothing to do at all if you're already signed in to osu! there.
 - **Picks up where it left off.** The queue is saved, so closing the app mid-run doesn't lose your place.
 - **Tells you when it's done.** A desktop notification at the end of a long run.
 - **One-click import** into **osu!stable** or **osu!lazer**, or automatically as each map finishes.
@@ -82,10 +83,15 @@ A black window opens (that's the app: keep it open while downloading and close i
 Mirror downloads need no osu! account, so you can skip to step 2. Sign in if you chose **osu.ppy.sh**
 as the source, or to let the app fall back to it for maps no mirror has.
 
-osu! only lets signed-in players download maps. Click **Sign in with osu!** and a Chrome window opens on osu!'s own
-sign-in page. Sign in there (including the captcha and any email code osu! asks for), then click **I've signed in**
-in the app, or just close that window. The app checks with osu! and shows your name. You stay signed in for
-about a month.
+Click **Sign in with osu!** and osu! opens **in a new tab of the browser you're already using**. Sign in there
+(including the captcha and any email code osu! asks for), then come back and click **I've signed in**. The app
+copies just your `osu.ppy.sh` session cookie out of your browser into its own, so downloads can use it. If
+you're already signed in to osu! in that browser, the whole step happens in one click with no tab at all.
+
+This works with Firefox-family browsers (Firefox, Zen, LibreWolf, Floorp, Waterfox), which keep cookie values
+in plain text. Chromium-based browsers encrypt theirs, so for those the app falls back to opening **its own
+Chrome window** on a private profile, where the session stays. You can pick that route yourself at any time
+with *Use a separate Chrome window instead*. Either way you stay signed in for about a month.
 
 <img src="docs/images/connect.png" width="660" alt="Sign-in step with a 'Sign in with osu!' button and an explanation of how sign-in works">
 
@@ -164,6 +170,8 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 |---|---|
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
 | **Maps in lazer aren't being skipped** | Press **Scan** next to *osu!lazer library*. If it says the folder wasn't found, set it manually — it's the folder holding `files` and `client.realm`. |
+| **A few old maps still aren't skipped** | Maps saved before osu! file format v10 carry no beatmap ID, so they're matched on artist/title/creator instead. That needs the metadata a profile list provides, so it can't work for a queue built by **pasting bare IDs**. |
+| **"Couldn't find an osu! sign-in in your browser"** | Sign in to osu! in your browser first, or use *Use a separate Chrome window instead*. Chromium-based browsers encrypt their cookies and always need that route. |
 | **"No download button"** for some maps | Turn on **Show explicit content** in your [osu! account settings](https://osu.ppy.sh/home/account/edit). Otherwise the map may have been removed. |
 | **"osu!'s hourly download limit reached"** | Expected after about 200 maps in an hour. The app retries the same map after 5, 10, 20 and 25 minutes and continues once osu! allows it, so just leave it running. Skipping to other maps doesn't help: the limit is per account, not per map. |
 | **"You're signed out of osu!"** | Your saved sign-in expired (after about a month) or you signed out. Click **Sign in with osu!** again. |
@@ -199,10 +207,14 @@ Chrome is only started if a download actually needs it.
 Everything stays on your machine. The interface is served only on `127.0.0.1`, requests from other websites are
 rejected, and your osu! session is only ever sent to osu!'s own servers (`*.ppy.sh`).
 
-Sign-in happens in a plain Chrome window with its own profile inside `data\`. osu!'s login page uses a Cloudflare
-captcha that fails in automated browsers (even one with just a debugging port open), so nothing is attached to that
-window. When you're done, the app closes it normally and checks the profile with headless Chrome. Downloads reuse
-the same profile.
+Sign-in normally happens in your own browser, and the app then reads only the `.ppy.sh` cookies out of that
+browser's `cookies.sqlite` and injects them into its Chrome profile in `data\`. No other site's cookies are
+touched, and the database is copied before reading so a running browser isn't disturbed.
+
+Where that isn't possible (Chromium-based browsers encrypt their cookie store), sign-in happens in a plain Chrome
+window with its own profile inside `data\`. osu!'s login page uses a Cloudflare captcha that fails in automated
+browsers (even one with just a debugging port open), so nothing is attached to that window. When you're done, the
+app closes it normally and checks the profile with headless Chrome. Downloads reuse the same profile.
 
 ### Portable folder layout
 

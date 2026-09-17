@@ -216,14 +216,22 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
     <p class="sub" id="loginWhy">osu! only lets signed-in players download maps. Sign in once and the app remembers it on this computer.</p>
     <div class="row" style="align-items:center">
       <button class="btn primary big" id="loginBtn" onclick="act('login')">Sign in with osu!</button>
-      <span class="hint">Opens a Chrome window with osu!'s own sign-in page.</span>
+      <span class="hint" id="loginHint">Opens osu! in a new tab of this browser.</span>
     </div>
+    <p class="sub" style="margin:10px 0 0">
+      <button class="linkbtn" id="loginChromeBtn" onclick="act('login', {mode: 'chrome'})">Use a separate Chrome window instead</button>
+      <span class="hint" id="loginChromeWhy"></span>
+    </p>
     <details>
       <summary>Is this safe?</summary>
       <div class="help">
-        You sign in on <b>osu.ppy.sh</b> in a normal Chrome window, including any captcha or email code osu! asks for.
-        The app doesn't control that window or read what you type. When you're done it closes the window and checks
-        with osu! that you're signed in.
+        You sign in on <b>osu.ppy.sh</b> in your own browser, including any captcha or email code osu! asks for.
+        The app doesn't control that tab or read what you type. When you're done it copies just your
+        <code>osu.ppy.sh</code> session cookie out of your browser into its own, so downloads can use it.
+        No other site's cookies are read.
+        <br><br>
+        If your browser keeps its cookies encrypted (anything Chromium-based), the app instead opens its own
+        Chrome window on a private profile, and the session stays in there.
         <br><br>
         Your sign-in is kept in this app's <code>data</code> folder (it lasts about a month), so don't share that folder.
         <b>Sign out</b> removes it. The app is <a href="https://github.com/AustinKol/osubeatmapdownloader" target="_blank" rel="noopener">open source</a>.
@@ -231,15 +239,15 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
     </details>
   </div>
   <div id="loginWaiting" class="hidden">
-    <p class="sub"><b>Sign in to osu! in the Chrome window that just opened</b> (including the captcha and any
+    <p class="sub" id="waitingText"><b>Sign in to osu! in the Chrome window that just opened</b> (including the captcha and any
       email code). When you're signed in, click the button below, or just close that window.</p>
     <div class="row" style="align-items:center">
       <button class="btn primary big" id="finishLoginBtn" onclick="act('finish-login')">I've signed in</button>
       <button class="btn" onclick="act('cancel-login')">Cancel</button>
-      <span class="hint">Can't see it? Check your taskbar for a new Chrome window.</span>
+      <span class="hint" id="waitingHint">Can't see it? Check your taskbar for a new Chrome window.</span>
     </div>
   </div>
-  <p class="sub hidden" id="loginDone" style="margin:0">You're signed in. Downloads run in a hidden Chrome window using this sign-in.</p>
+  <p class="sub hidden" id="loginDone" style="margin:0">You're signed in. It's only needed for osu.ppy.sh downloads; mirror downloads don't use it.</p>
 </section>
 
 <!-- STEP 2 -->
@@ -619,6 +627,20 @@ function render() {
   if (signedIn) { $('userName').textContent = S.user.username; $('userAvatar').src = S.user.avatar || ''; }
   $('loginForm').classList.toggle('hidden', signedIn || S.signing_in);
   $('loginWaiting').classList.toggle('hidden', !S.signing_in);
+  const viaBrowser = S.login_mode === 'browser';
+  $('loginHint').textContent = S.can_read_browser
+    ? 'Opens osu! in a new tab of this browser.'
+    : "Opens a Chrome window with osu!'s own sign-in page.";
+  $('loginChromeBtn').classList.toggle('hidden', !S.can_read_browser);
+  $('loginChromeWhy').textContent = S.can_read_browser ? 'if signing in here does not work' : '';
+  $('waitingText').innerHTML = viaBrowser
+    ? "<b>Sign in to osu! in the tab that just opened</b> (including the captcha and any email code). "
+      + "Then come back here and click the button below."
+    : "<b>Sign in to osu! in the Chrome window that just opened</b> (including the captcha and any "
+      + "email code). When you're signed in, click the button below, or just close that window.";
+  $('waitingHint').textContent = viaBrowser
+    ? "Check your other browser tabs for osu!."
+    : "Can't see it? Check your taskbar for a new Chrome window.";
   $('loginDone').classList.toggle('hidden', !signedIn || S.signing_in);
   $('n1').classList.toggle('ok', signedIn); $('n1').textContent = signedIn ? '✓' : '1';
   $('loginBtn').disabled = !!S.busy || S.running;
@@ -635,7 +657,8 @@ function render() {
   $('exportLazer').classList.toggle('hidden', !S.lazer_found);
   $('lazerInfo').innerHTML = S.lazer_found
     ? `Found <code>${esc(S.lazer_found)}</code>` + (S.lazer_count
-        ? ` · <b>${S.lazer_count}</b> beatmap sets already in lazer, and they'll be skipped.`
+        ? ` · <b>${S.lazer_count}</b> beatmap sets already in lazer, and they'll be skipped`
+          + (S.lazer_by_name ? ` (${S.lazer_by_name} of them older than beatmap IDs, matched by name).` : '.')
         : ` · press <b>Scan</b> to count what's already there.`)
     : `<span class="missing">No osu!lazer library found.</span> Set it above if lazer is installed somewhere unusual.`;
 
