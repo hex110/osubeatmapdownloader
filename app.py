@@ -98,12 +98,11 @@ class State:
         self.owned = set()          # in an osu!stable Songs folder
         self.owned_lazer = set()      # already imported into osu!lazer
         self.owned_lazer_keys = set()  # ...and the pre-v10 maps that carry no ID
-        self.queue = self._restore_queue()
+        self.queue, self.queue_sources = self._restore_queue()
         self.matches = _load(MATCHES_FILE, [])  # song -> candidates, awaiting confirmation
         self.matches = self.matches if isinstance(self.matches, list) else []
         self.match_total = len(self.matches)
         self.queue_saved_at = 0
-        self.queue_source = _load(CONFIG_FILE, {}).get("queue_source", "")
         self.logs = []
         self.busy = ""
         self.busy_token = None
@@ -119,23 +118,37 @@ class State:
             "lazer_dir": self.lazer_dir, "osu_paths": self.osu_paths, "opts": self.opts,
             "spotify": self.spotify,
             "last_user_query": self.last_user_query, "mirror_speeds": core.speeds_snapshot(),
-            "queue_source": self.queue_source,
         })
 
     def save_history(self):
         _save(HISTORY_FILE, sorted(self.history, key=int))
 
     def _restore_queue(self):
-        """Bring back the queue from the last session, with any in-flight maps re-queued."""
-        items = _load(QUEUE_FILE, [])
-        if not isinstance(items, list):
-            return []
+        """Bring back the queue and where it came from, with any in-flight maps re-queued."""
+        data = _load(QUEUE_FILE, {})
+        if isinstance(data, list):
+            items, sources = data, []      # the format before sources were recorded
+        elif isinstance(data, dict):
+            items, sources = data.get("queue") or [], data.get("sources") or []
+        else:
+            return [], []
+        if not isinstance(items, list) or not isinstance(sources, list):
+            return [], []
         for it in items:
             if not isinstance(it, dict) or "id" not in it:
-                return []
+                return [], []
             if it.get("status") in ("downloading", None):
                 it["status"] = "queued"
-        return items
+        return items, [str(x) for x in sources]
+
+    def queue_source(self):
+        """A short line saying where the queue came from, however many sources filled it."""
+        if not self.queue_sources:
+            return ""
+        first, extra = self.queue_sources[0], len(self.queue_sources) - 1
+        if not extra:
+            return first
+        return f"{first} + {extra} more source{'' if extra == 1 else 's'}"
 
     def save_matches(self):
         try:
@@ -150,7 +163,7 @@ class State:
             return
         self.queue_saved_at = now
         try:
-            _save(QUEUE_FILE, self.queue)
+            _save(QUEUE_FILE, {"queue": self.queue, "sources": self.queue_sources})
         except OSError:
             pass  # losing the resume file must never stop a download
 
@@ -245,9 +258,10 @@ class State:
                 self.queue = self.queue + [i for i in items if i["id"] not in have]
             else:
                 self.queue = items
+            if not append:
+                self.queue_sources = []
             if source:
-                self.queue_source = source if not append or not self.queue_source \
-                    else f"{self.queue_source} + {source}"
+                self.queue_sources.append(source)
         self.save_queue(force=True)
 
     def snapshot(self, log_since):
@@ -270,7 +284,7 @@ class State:
                 "last_user_query": self.last_user_query, "history_count": len(self.history),
                 "clients": self.clients(),
                 "queue": self.queue, "counts": counts, "busy": self.busy,
-                "queue_source": self.queue_source,
+                "queue_source": self.queue_source(),
                 "running": self.running(),
                 "job": self.job.status(counts.get("queued", 0) + counts.get("downloading", 0))
                        if self.running() else None,
@@ -547,7 +561,7 @@ def act_match_queue(_):
     if not items:
         raise ValueError("Nothing confirmed yet: pick a beatmap for at least one song.")
     before = len(S.queue)
-    S.set_queue(items, append=True, source=f"{len(items)} from a playlist")
+    S.set_queue(items, append=True, source=f"{len(items)} maps from a playlist")
     added = len(S.queue) - before
     S.log("ok", f"Added {added} beatmap set{'' if added == 1 else 's'} from your playlist"
                 + (f" ({len(items) - added} already in the queue)." if added < len(items) else "."))
@@ -723,7 +737,7 @@ def act_toggle(body):
 def act_clear_queue(_):
     if S.running():
         raise ValueError("Stop the download first.")
-    S.queue = []
+    S.queue, S.queue_sources = [], []
     S.save_queue(force=True)
 
 
@@ -951,12 +965,16 @@ Fill the queue without touching the interface:
   --limit N             how many maps (default 100)
   --min-plays N         for most_played, stop below this play count
   --collection URL      an osu!collector collection
+  --spotify URL         a Spotify playlist (needs credentials saved in the app first)
   --list FILE           a text file of beatmap IDs or links
+  --songs FILE          a text file of "Artist - Title" lines, or a playlist CSV
+  --confident-only      with --spotify/--songs, queue only the confident matches
   --start               begin downloading once the queue is filled
   --exit-when-done      quit after the download finishes (implies --start, --no-browser)
 
   python app.py --collection https://osucollector.com/collections/23333 --start
   python app.py --profile Hex110 --limit 500 --min-plays 5 --exit-when-done
+  python app.py --spotify https://open.spotify.com/playlist/… --confident-only --start
 """
 
 
@@ -966,16 +984,38 @@ def _arg(name, default=None):
 
 
 def queue_from_args(cancel):
-    """Fill the queue from --profile / --collection / --list, for scripted runs."""
+    """Fill the queue from a --profile / --collection / --spotify / --list / --songs flag."""
     if "--collection" in sys.argv:
         act_collection({"link": _arg("--collection"), "limit": _arg("--limit", 20000)})
     elif "--list" in sys.argv:
         act_paste({"text": Path(_arg("--list")).read_text("utf-8")})
+    elif "--spotify" in sys.argv or "--songs" in sys.argv:
+        return _queue_songs_from_args()
     elif "--profile" in sys.argv:
         act_fetch({"user": _arg("--profile", ""), "kind": _arg("--kind", "most_played"),
                    "limit": _arg("--limit", 100), "min_plays": _arg("--min-plays", 0)})
     else:
         return False
+    return True
+
+
+def _queue_songs_from_args():
+    """Match a playlist and queue the picks, since nobody is there to confirm them."""
+    if "--spotify" in sys.argv:
+        act_spotify({"link": _arg("--spotify"), "limit": _arg("--limit", MAX_TRACKS)})
+    else:
+        act_match({"text": Path(_arg("--songs")).read_text("utf-8")})
+    while S.busy:
+        time.sleep(0.5)
+    if "--confident-only" in sys.argv:
+        act_match_bulk({"what": "good"})
+    unsure = sum(1 for m in S.matches if m["include"]
+                 and m["candidates"][m["pick"]]["text"] < 0.85)
+    if unsure:
+        S.log("warn", f"{unsure} song(s) matched a beatmap only loosely. Nobody is here to "
+                      f"check them; use --confident-only to queue just the clear ones.")
+    if any(m["include"] for m in S.matches):
+        act_match_queue({})
     return True
 
 

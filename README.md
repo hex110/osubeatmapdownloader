@@ -306,9 +306,12 @@ It can also run without the interface, for a scheduled job or a script:
 python app.py --collection https://osucollector.com/collections/23333 --start
 python app.py --profile Hex110 --limit 500 --min-plays 5 --exit-when-done
 python app.py --list maps.txt --exit-when-done
+python app.py --spotify https://open.spotify.com/playlist/… --confident-only --start
 ```
 
-`--exit-when-done` quits once the queue finishes, so it works in cron.
+`--exit-when-done` quits once the queue finishes, so it works in cron. `--spotify` and `--songs`
+match songs to beatmaps with nobody there to confirm them, so they warn about loose matches;
+`--confident-only` queues just the ones whose names clearly agree.
 
 ### Linux notes
 
