@@ -54,11 +54,14 @@ for _key in ("TEMP", "TMP", "TMPDIR"):  # remembered so osu! can be launched wit
 PROFILE_DIR = DATA / "chrome-profile"  # the signed-in osu! session lives here
 CONFIG_FILE = DATA / "config.json"
 HISTORY_FILE = DATA / "history.json"
+QUEUE_FILE = DATA / "queue.json"   # so a long run survives restarting the app
 INDEX = ROOT / "web" / "index.html"
 PREFERRED_PORT = 8765
 
 DEFAULT_OPTS = {"no_video": False, "auto_open": False, "import_client": "stable", "show_browser": False,
-                "delay": 5, "batch": 60, "rest": 15, "cooldown": 300, "timeout": 90}
+                "delay": 5, "batch": 60, "rest": 15, "cooldown": 300, "timeout": 90,
+                # mirrors are the default source: no sign-in, no browser, no hourly limit
+                "source": "mirror", "mirror_fallback": True, "mirror_delay": 1, "notify": True}
 
 
 def _load(path, default):
@@ -81,13 +84,16 @@ class State:
         cfg = _load(CONFIG_FILE, {})
         self.folder = cfg.get("folder") or str(DEFAULT_DOWNLOADS)
         self.songs_dir = cfg.get("songs_dir", "")
+        self.lazer_dir = cfg.get("lazer_dir", "")
         self.osu_paths = {"stable": "", "lazer": "", **cfg.get("osu_paths", {})}  # user-picked installs
         self.opts = {**DEFAULT_OPTS, **cfg.get("opts", {})}
         self.last_user_query = cfg.get("last_user_query", "")
         self.user = cfg.get("user") if PROFILE_DIR.is_dir() else None  # confirmed on startup
         self.history = set(_load(HISTORY_FILE, []))
-        self.owned = set()
-        self.queue = []
+        self.owned = set()          # in an osu!stable Songs folder
+        self.owned_lazer = set()    # already imported into osu!lazer
+        self.queue = self._restore_queue()
+        self.queue_saved_at = 0
         self.logs = []
         self.busy = ""
         self.busy_token = None
@@ -98,11 +104,35 @@ class State:
     def save_config(self):
         _save(CONFIG_FILE, {
             "user": self.user, "folder": self.folder, "songs_dir": self.songs_dir,
-            "osu_paths": self.osu_paths, "opts": self.opts, "last_user_query": self.last_user_query,
+            "lazer_dir": self.lazer_dir, "osu_paths": self.osu_paths, "opts": self.opts,
+            "last_user_query": self.last_user_query,
         })
 
     def save_history(self):
         _save(HISTORY_FILE, sorted(self.history, key=int))
+
+    def _restore_queue(self):
+        """Bring back the queue from the last session, with any in-flight maps re-queued."""
+        items = _load(QUEUE_FILE, [])
+        if not isinstance(items, list):
+            return []
+        for it in items:
+            if not isinstance(it, dict) or "id" not in it:
+                return []
+            if it.get("status") in ("downloading", None):
+                it["status"] = "queued"
+        return items
+
+    def save_queue(self, force=False):
+        """Persist the queue, at most once every few seconds during a run."""
+        now = time.time()
+        if not force and now - self.queue_saved_at < 5:
+            return
+        self.queue_saved_at = now
+        try:
+            _save(QUEUE_FILE, self.queue)
+        except OSError:
+            pass  # losing the resume file must never stop a download
 
     # -- logging / queue
     def log(self, level, msg):
@@ -117,10 +147,11 @@ class State:
             self.save_config()
 
     def on_item(self, item):
-        if item["status"] == "done":
-            with self.lock:
+        with self.lock:
+            if item["status"] == "done":
                 self.history.add(item["id"])
                 self.save_history()
+            self.save_queue()
 
     def clients(self):
         """Which osu! installs exist (cached briefly, since this runs on every UI poll)."""
@@ -134,18 +165,36 @@ class State:
     def running(self):
         return bool(self.job and self.job.thread.is_alive())
 
+    def lazer_data_dir(self):
+        """Where osu!lazer keeps its library (cached: the UI asks on every poll)."""
+        if self.lazer_dir:
+            return self.lazer_dir
+        now = time.time()
+        if now - getattr(self, "_lazer_at", 0) > 30:
+            self._lazer_found = core.find_lazer_data() or ""
+            self._lazer_at = now
+        return self._lazer_found
+
     def refresh_owned(self):
-        self.owned = set()
+        self.owned, self.owned_lazer = set(), set()
         if self.songs_dir:
             try:
                 self.owned = core.scan_songs_folder(self.songs_dir)
             except (ValueError, OSError) as e:
                 self.log("warn", f"Couldn't read Songs folder: {e}")
+        data = self.lazer_data_dir()
+        if data:
+            try:
+                self.owned_lazer = core.scan_lazer_library(data)
+            except (ValueError, OSError) as e:
+                self.log("warn", f"Couldn't read your osu!lazer library: {e}")
 
     def classify(self, item):
         sid = item["id"]
         if sid in self.owned:
             return "have", "Already in your osu! Songs folder"
+        if sid in self.owned_lazer:
+            return "have", "Already in osu!lazer"
         if core.find_osz(self.folder, sid):
             return "have", "Already in the download folder"
         if sid in self.history:
@@ -159,6 +208,7 @@ class State:
             it.setdefault("error", "")
         with self.lock:
             self.queue = items
+        self.save_queue(force=True)
 
     def snapshot(self, log_since):
         self.check_job()
@@ -169,6 +219,8 @@ class State:
             return {
                 "user": self.user, "signing_in": bool(self.signing_in),
                 "folder": self.folder, "songs_dir": self.songs_dir, "opts": self.opts,
+                "lazer_dir": self.lazer_dir, "lazer_found": self.lazer_data_dir(),
+                "lazer_count": len(self.owned_lazer),
                 "last_user_query": self.last_user_query, "history_count": len(self.history),
                 "clients": self.clients(),
                 "queue": self.queue, "counts": counts, "busy": self.busy,
@@ -261,12 +313,14 @@ def act_fetch(body):
     if kind not in ("most_played", "favourite", "ranked", "loved", "graveyard", "guest", "nominated"):
         raise ValueError("Unknown list type.")
     limit = max(1, min(int(body.get("limit") or 100), 20000))
+    min_plays = max(0, min(int(body.get("min_plays") or 0), 1000000))
     S.last_user_query = body.get("user", "")
     S.save_config()
 
     def run():
-        S.log("info", f"Fetching up to {limit} maps from {query}'s {kind.replace('_', ' ')} list…")
-        items = core.fetch_user_maps(query, kind, limit,
+        cut = f" played at least {min_plays} times" if min_plays else ""
+        S.log("info", f"Fetching up to {limit} maps{cut} from {query}'s {kind.replace('_', ' ')} list…")
+        items = core.fetch_user_maps(query, kind, limit, min_plays=min_plays,
                                      on_progress=lambda n: setattr(S, "busy", f"Fetching… {n} maps"))
         S.set_queue(items)
         have = sum(1 for i in items if i["status"] == "have")
@@ -290,6 +344,13 @@ def act_settings(body):
             S.folder = body["folder"].strip()
         if "songs_dir" in body:
             S.songs_dir = body["songs_dir"].strip()
+        if "lazer_dir" in body:
+            folder = body["lazer_dir"].strip()
+            if folder and not (Path(folder) / "files").is_dir():
+                raise ValueError("That isn't an osu!lazer data folder. Pick the one containing "
+                                 "'files' and 'client.realm' (usually ~/.local/share/osu).")
+            S.lazer_dir = folder
+            S._lazer_at = 0
         for client, folder in (body.get("osu_paths") or {}).items():
             if client not in S.osu_paths:
                 continue
@@ -301,12 +362,14 @@ def act_settings(body):
             for k, v in body["opts"].items():
                 if k == "import_client" and v not in ("stable", "lazer"):
                     raise ValueError("Pick osu!stable or osu!lazer.")
+                if k == "source" and v not in ("mirror", "official"):
+                    raise ValueError("Pick a mirror or the official osu! website.")
                 if k in DEFAULT_OPTS:
                     S.opts[k] = type(DEFAULT_OPTS[k])(v)
         S.save_config()
         if "songs_dir" in body:
             S._clients_at = 0
-        if ("folder" in body or "songs_dir" in body) and not S.running():
+        if ("folder" in body or "songs_dir" in body or "lazer_dir" in body) and not S.running():
             S.set_queue(S.queue)  # re-evaluate what's already owned
 
 
@@ -315,12 +378,16 @@ def act_start(_):
         raise ValueError("Already downloading.")
     if S.busy:
         raise ValueError("Wait for the current task to finish first.")
-    if not S.user:
-        raise ValueError("Sign in first.")
+    mirror = S.opts.get("source", "mirror") == "mirror"
+    if not S.user and not mirror:
+        raise ValueError("Sign in first, or switch the download source to the mirrors.")
     if not any(i["status"] == "queued" for i in S.queue):
         raise ValueError("Nothing to download: the queue is empty or you already have everything.")
-    opts = {**S.opts, "songs_dir": S.songs_dir, "osu_paths": dict(S.osu_paths)}
-    S.job = core.Downloader(S.queue, PROFILE_DIR, S.folder, opts, S.on_item, S.log)
+    opts = {**S.opts, "songs_dir": S.songs_dir, "osu_paths": dict(S.osu_paths),
+            # falling back to the website needs a signed-in browser
+            "mirror_fallback": bool(S.opts.get("mirror_fallback")) and bool(S.user)}
+    S.job = core.Downloader(S.queue, PROFILE_DIR, S.folder, opts, S.on_item, S.log,
+                            on_finish=lambda: S.save_queue(force=True))
     S.job.start()
 
 
@@ -348,6 +415,7 @@ def act_retry(_):
         if it["status"] in ("failed", "cancelled"):
             it["status"], it["error"] = "queued", ""
             n += 1
+    S.save_queue(force=True)
     S.log("info", f"Re-queued {n} maps.")
 
 
@@ -361,12 +429,14 @@ def act_toggle(body):
                 it["status"] = "queued"
             elif it["status"] == "queued":
                 it["status"] = "skipped"
+    S.save_queue(force=True)
 
 
 def act_clear_queue(_):
     if S.running():
         raise ValueError("Stop the download first.")
     S.queue = []
+    S.save_queue(force=True)
 
 
 def act_clear_history(_):
@@ -451,11 +521,22 @@ def pick_folder(initial, title):
     print(filedialog.askdirectory(initialdir=initial, title=title) or "", flush=True)
 
 
-def act_scan(_):
-    if not S.songs_dir:
-        raise ValueError("Pick your osu! Songs folder first.")
-    ids = core.scan_songs_folder(S.songs_dir)
-    S.log("ok", f"Your Songs folder has {len(ids)} beatmap sets.")
+def act_scan(body):
+    """Count what's already in an osu!stable Songs folder or an osu!lazer library."""
+    if body.get("which") == "lazer":
+        data = S.lazer_data_dir()
+        if not data:
+            raise ValueError("Couldn't find your osu!lazer data folder. Set it in Folders & options.")
+        ids = core.scan_lazer_library(data)
+        S.log("ok", f"Your osu!lazer library has {len(ids)} beatmap sets.")
+    else:
+        if not S.songs_dir:
+            raise ValueError("Pick your osu! Songs folder first.")
+        ids = core.scan_songs_folder(S.songs_dir)
+        S.log("ok", f"Your Songs folder has {len(ids)} beatmap sets.")
+    if not S.running():
+        S.refresh_owned()
+        S.set_queue(S.queue)
     return {"ids": sorted(ids, key=int)}
 
 
@@ -503,6 +584,9 @@ class Handler(BaseHTTPRequestHandler):
             which = q.get("which", ["all"])[0]
             if which == "library":
                 ids = sorted(core.scan_songs_folder(S.songs_dir), key=int) if S.songs_dir else []
+            elif which == "lazer":
+                data = S.lazer_data_dir()
+                ids = sorted(core.scan_lazer_library(data), key=int) if data else []
             elif which == "history":
                 ids = sorted(S.history, key=int)
             else:
@@ -590,6 +674,12 @@ def main():
         if installed.get("lazer") and not installed.get("stable"):
             S.opts["import_client"] = "lazer"
             S.save_config()
+
+    if S.queue:
+        S.refresh_owned()
+        left = sum(1 for i in S.queue if i["status"] == "queued")
+        S.log("info", f"Restored your queue from last time: {len(S.queue)} maps"
+                      + (f", {left} still to download." if left else ", all finished."))
 
     verify_sign_in()
     PORT = free_port(preferred)

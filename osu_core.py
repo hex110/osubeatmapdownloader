@@ -5,6 +5,7 @@ Everything that talks to osu.ppy.sh lives here; app.py only wires it to the UI.
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -66,9 +67,14 @@ def resolve_user_id(user):
     raise ValueError(f"Couldn't find an osu! user called “{name}”.")
 
 
-def fetch_user_maps(user, kind, limit, on_progress=None):
-    """Return [{id, title, artist, cover}] from a user's profile list, deduplicated."""
+def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0):
+    """Return [{id, title, artist, cover, plays}] from a user's profile list, deduplicated.
+
+    `min_plays` only applies to the most_played list, which is ordered by play count, so
+    the first map below the threshold ends the search.
+    """
     uid = resolve_user_id(user)
+    min_plays = min_plays if kind == "most_played" else 0
     out, seen, offset = [], set(), 0
     while len(out) < limit:
         page = _get_json(f"{OSU}/users/{uid}/beatmapsets/{kind}?offset={offset}&limit=100")
@@ -77,6 +83,8 @@ def fetch_user_maps(user, kind, limit, on_progress=None):
         for item in page:
             s = item["beatmapset"] if kind == "most_played" else item
             sid = str(s["id"])
+            if min_plays and item.get("count", 0) < min_plays:
+                return out  # sorted by plays, so everything after this is below the cut too
             if sid in seen:
                 continue
             seen.add(sid)
@@ -117,6 +125,170 @@ def find_osz(folder, sid):
     except FileNotFoundError:
         pass
     return None
+
+
+# ---------------------------------------------------------------- mirrors
+#
+# Public mirrors serve .osz files over plain HTTP: no sign-in, no browser and no hourly
+# limit, which makes them roughly ten times faster than clicking Download on the website.
+# Ordered best-first; each entry is (name, full URL, no-video URL).
+
+MIRRORS = (
+    ("catboy.best", "https://catboy.best/d/{sid}", "https://catboy.best/d/{sid}n"),
+    ("osu.direct", "https://osu.direct/api/d/{sid}", "https://osu.direct/api/d/{sid}?noVideo=1"),
+    ("beatconnect.io", "https://beatconnect.io/b/{sid}/", "https://beatconnect.io/b/{sid}/?novideo=1"),
+    ("nerinyan.moe", "https://api.nerinyan.moe/d/{sid}", "https://api.nerinyan.moe/d/{sid}?noVideo=true"),
+)
+
+UNSAFE_IN_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _osz_name(sid, disposition, item):
+    """A safe '<id> Artist - Title.osz' name for a mirror download.
+
+    The name matters: find_osz() recognises an already-downloaded set by the leading ID, and
+    osu!stable takes the folder name from it. A mirror's filename is untrusted, so strip any
+    path separators before using it.
+    """
+    name = ""
+    m = re.search(r"filename\*?=(?:UTF-8'')?\"?([^\";]+)", disposition or "")
+    if m:
+        name = urllib.parse.unquote(m.group(1)).strip()
+    if not name and (item.get("artist") or item.get("title")):
+        name = f"{sid} {item.get('artist', '')} - {item.get('title', '')}.osz"
+    # replace the unsafe characters first: doing it after Path().name would throw away
+    # everything before a '/' in a title like "Love: Comes/Goes"
+    name = Path(UNSAFE_IN_NAME.sub("_", name)).name.strip(". ")
+    if not name.lower().endswith(".osz"):
+        name = f"{sid}.osz"
+    if not re.match(rf"{sid}(\D|$)", name):
+        name = f"{sid} {name}"
+    return name[:180]
+
+
+def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, stop=None):
+    """Fetch one beatmapset from the first mirror that has it.
+
+    Returns (path, mirror name) on success or (None, reason). Tries every mirror before
+    giving up, so one being down or missing a map doesn't fail the download.
+    """
+    item = item or {}
+    reason, absent = "No mirror had this beatmap.", 0
+    for name, full_url, novideo_url in MIRRORS:
+        if stop is not None and stop.is_set():
+            return None, "Cancelled."
+        url = (novideo_url if no_video else full_url).format(sid=sid)
+        tmp = None
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                ctype = (r.headers.get("Content-Type") or "").lower()
+                if "html" in ctype or "json" in ctype:
+                    reason, absent = f"{name}: doesn't have this beatmap.", absent + 1
+                    continue
+                first = r.read(65536)
+                if not first.startswith(b"PK"):  # every .osz is a zip
+                    reason = f"{name}: didn't send a beatmap file."
+                    continue
+                target = Path(folder) / _osz_name(sid, r.headers.get("Content-Disposition"), item)
+                tmp = target.with_name(target.name + ".part")
+                size = 0
+                with open(tmp, "wb") as f:
+                    chunk = first
+                    while chunk:
+                        if stop is not None and stop.is_set():
+                            raise _Cancelled
+                        f.write(chunk)
+                        size += len(chunk)
+                        chunk = r.read(262144)
+            if size < 1024:
+                reason = f"{name}: sent an empty file."
+                tmp.unlink(missing_ok=True)
+                continue
+            tmp.replace(target)
+            return str(target), name
+        except _Cancelled:
+            return None, "Cancelled."
+        except urllib.error.HTTPError as e:
+            absent += e.code == 404
+            reason = f"{name}: " + ("doesn't have this beatmap." if e.code == 404 else f"HTTP {e.code}.")
+        except Exception as e:  # timeout, DNS, dropped connection: just try the next mirror
+            reason = f"{name}: {type(e).__name__}."
+        finally:
+            if tmp:
+                tmp.unlink(missing_ok=True)
+    if absent == len(MIRRORS):
+        return None, "No mirror has this beatmap (it may be unranked, deleted or very new)."
+    return None, reason
+
+
+# ---------------------------------------------------------------- osu!lazer's library
+
+def find_lazer_data(custom=""):
+    """osu!lazer's data folder (the one holding 'files' and 'client.realm'), or None."""
+    bases = [Path(custom)] if custom else []
+    if os.name == "nt":
+        bases.append(Path(os.environ.get("APPDATA", Path.home())) / "osu")
+    else:
+        bases += [Path.home() / ".local/share/osu", Path.home() / ".var/app/sh.ppy.osu/data/osu"]
+    for base in list(bases):
+        try:  # lazer records a relocated library here
+            m = re.search(r"FullPath\s*=\s*(.+)", (base / "storage.ini").read_text("utf-8"))
+            if m:
+                bases.append(Path(m.group(1).strip()))
+        except OSError:
+            pass
+    for base in bases:
+        if (base / "files").is_dir():
+            return str(base)
+    return None
+
+
+def scan_lazer_library(data_dir):
+    """Beatmapset IDs already imported into osu!lazer.
+
+    lazer keeps every file under 'files/' named by its SHA-256, with the metadata in a Realm
+    database that needs Realm itself to read. The .osu difficulty files are plain text
+    though, and each one names the set it belongs to, so read those instead. Scanning ~24k
+    files takes about a tenth of a second because all but the header of most is skipped.
+    """
+    root = Path(data_dir) / "files"
+    if not root.is_dir():
+        raise ValueError("That isn't an osu!lazer data folder (it has no 'files' inside).")
+    ids = set()
+    for dirpath, _, names in os.walk(root):
+        for n in names:
+            try:
+                with open(os.path.join(dirpath, n), "rb") as f:
+                    if not f.read(15).startswith(b"osu file format"):
+                        continue
+                    blob = f.read(16384)  # [Metadata] is always near the top
+            except OSError:
+                continue
+            m = re.search(rb"^BeatmapSetID\s*:\s*(\d+)", blob, re.M)
+            if m and m.group(1) != b"0":
+                ids.add(m.group(1).decode())  # unsubmitted maps use -1 and don't match
+    return ids
+
+
+# ---------------------------------------------------------------- desktop notification
+
+def notify(title, message):
+    """A desktop notification when a long run finishes. Never fatal if it doesn't work."""
+    import shutil
+    import subprocess
+    try:
+        if os.name == "nt":
+            return  # the web UI raises its own notification there
+        if sys.platform == "darwin":
+            body = message.replace('"', "'")
+            subprocess.Popen(["osascript", "-e", f'display notification "{body}" with title "{title}"'],
+                             start_new_session=True)
+        elif shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "-a", "osu! Beatmap Downloader", title, message],
+                             start_new_session=True)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 # ---------------------------------------------------------------- browser
@@ -209,6 +381,10 @@ LOGIN_URL = f"{OSU}/home/account/edit"  # logged-out visitors get the sign-in fo
 
 class SignInCancelled(Exception):
     pass
+
+
+class _Cancelled(Exception):
+    """Raised inside a mirror download when the user stops the queue."""
 
 
 # Chromium-based browsers Selenium can drive, best first. Chrome is preferred because
@@ -391,22 +567,30 @@ def _resume_time(refused_at, batch_start):
 class Downloader:
     """Runs a download queue on a background thread and reports through callbacks."""
 
-    def __init__(self, items, profile_dir, folder, opts, emit, log):
+    def __init__(self, items, profile_dir, folder, opts, emit, log, on_finish=None):
         self.items = items          # list of dicts; this class mutates item["status"]
         self.profile_dir = profile_dir
         self.folder = Path(folder)
         self.opts = opts
         self.emit = emit            # emit(item) after any status change
         self.log = log              # log(level, message)
+        self.on_finish = on_finish  # called once the queue is done, however it ended
         self.stop_flag = threading.Event()
         self.pause_flag = threading.Event()
         self.warned_client = False
         self.signed_out = False
+        self.driver = None
+        self.locked = False
+        # mirrors have no hourly quota and need no browser, so most of the pacing below
+        # only applies to downloads that go through the osu! website
+        self.mirror_first = opts.get("source", "mirror") == "mirror"
+        self.allow_browser = not self.mirror_first or bool(opts.get("mirror_fallback", True))
+        self.mirror_used = None
         # progress/ETA bookkeeping, read by the UI
         self.batch_done = 0             # downloads since the last time osu! let us resume
         self.batch_started_at = None    # time of the batch's first download
-        self.hourly_limit = DEFAULT_HOURLY_LIMIT  # learned from the first refusal
-        self.limit_learned = False
+        self.hourly_limit = None if self.mirror_first else DEFAULT_HOURLY_LIMIT
+        self.limit_learned = self.mirror_first  # nothing to learn: mirrors don't ration
         self.quota_hit_at = None        # when osu! started refusing (None = not limited)
         self.retry_at = None            # when the next retry happens while limited
         self.retry_attempt = 0
@@ -425,7 +609,9 @@ class Downloader:
         limit = self.hourly_limit
         if not self.limit_learned and self.batch_done > limit:
             limit = None  # past the default without being refused: probably a supporter
-        per_map = self.per_map or float(self.opts.get("delay", 5)) + 3
+        default_delay = float(self.opts.get("mirror_delay", 1) if self.mirror_first
+                              else self.opts.get("delay", 5))
+        per_map = self.per_map or default_delay + (2 if self.mirror_first else 3)
         now = time.time()
         t, left = now, remaining
         if self.quota_hit_at:
@@ -467,40 +653,77 @@ class Downloader:
         item.update(extra)
         self.emit(item)
 
+    def _ensure_browser(self):
+        """Start headless Chrome on demand: mirror downloads never need it."""
+        if self.driver:
+            return self.driver
+        _hold_profile()
+        self.locked = True
+        self.log("info", "Starting Chrome in the background…")
+        self.driver = make_driver(self.folder, headless=not self.opts.get("show_browser"),
+                                  profile_dir=self.profile_dir)
+        user = current_user(self.driver)
+        if not user:
+            self.signed_out = True
+            raise PermissionError("You're signed out of osu! Click “Sign in with osu!” and try again.")
+        self.log("ok", f"Signed in as {user['username']}.")
+        return self.driver
+
     def _run(self):
         self.folder.mkdir(parents=True, exist_ok=True)
-        driver = None
-        locked = False
+        # a mirror download that was killed outright (rather than stopped) leaves its
+        # part-file behind, so clear those before starting
+        for leftover in self.folder.glob("*.osz.part"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
         try:
-            _hold_profile()
-            locked = True
-            self.log("info", "Starting Chrome in the background…")
-            driver = make_driver(self.folder, headless=not self.opts.get("show_browser"),
-                                 profile_dir=self.profile_dir)
-            user = current_user(driver)
-            if not user:
-                self.signed_out = True
-                raise PermissionError("You're signed out of osu! Click “Sign in with osu!” and try again.")
-            self.log("ok", f"Signed in as {user['username']}.")
-            self._loop(driver)
+            if self.mirror_first:
+                self.log("info", "Downloading from public mirrors, so no sign-in or browser is needed.")
+            else:
+                self._ensure_browser()
+            self._loop()
         except Exception as e:  # surface anything unexpected to the UI instead of dying silently
             self.log("error", friendly_error(e))
         finally:
-            if driver:
+            if self.driver:
                 # give in-flight downloads a moment to land before closing Chrome
                 deadline = time.time() + 30
                 while time.time() < deadline and any(self.folder.glob("*.crdownload")):
                     time.sleep(0.5)
-                driver.quit()
-            if locked:
+                self.driver.quit()
+            if self.locked:
                 PROFILE_LOCK.release()
             for item in self.items:
                 if item["status"] in ("queued", "downloading"):
                     self._set(item, "cancelled" if self.stop_flag.is_set() else "failed")
             self.log("info", "Stopped." if self.stop_flag.is_set() else "All done.")
+            if self.on_finish:
+                # the last status changes may have been inside the save throttle, so make
+                # sure what is on disk matches how the run actually ended
+                try:
+                    self.on_finish()
+                except Exception:
+                    pass
+            self._notify_done()
 
-    def _loop(self, driver):
-        delay = float(self.opts.get("delay", 5))
+    def _notify_done(self):
+        """Desktop notification, since a big queue is something you walk away from."""
+        if not self.opts.get("notify"):
+            return
+        done = sum(1 for i in self.items if i["status"] == "done")
+        failed = sum(1 for i in self.items if i["status"] == "failed")
+        if not done and not failed:
+            return
+        what = "Stopped" if self.stop_flag.is_set() else "Finished"
+        notify("osu! Beatmap Downloader",
+               f"{what}: {done} beatmap{'' if done == 1 else 's'} downloaded"
+               + (f", {failed} failed." if failed else "."))
+
+    def _loop(self):
+        mirror = self.mirror_first
+        delay = float(self.opts.get("mirror_delay", 1) if mirror else self.opts.get("delay", 5))
         batch, rest = int(self.opts.get("batch", 60)), float(self.opts.get("rest", 15))
         cooldown = float(self.opts.get("cooldown", 300))
         timeout = float(self.opts.get("timeout", 90))
@@ -511,7 +734,7 @@ class Downloader:
                 return
             if item["status"] != "queued":
                 continue
-            if since_rest >= batch:
+            if not mirror and since_rest >= batch:
                 self.log("info", f"Taking a {rest:g}s breather to stay under osu!'s rate limit.")
                 if not self._sleep(rest):
                     return
@@ -521,7 +744,7 @@ class Downloader:
 
             self._set(item, "downloading")
             started = time.time()
-            ok, reason = self._download_one(driver, item, timeout)
+            ok, reason = self._download_one(item, timeout)
             since_rest += 1
             attempt = 0
             while not ok and "quota" in reason.lower():
@@ -529,8 +752,12 @@ class Downloader:
                 if not self.quota_hit_at:
                     self.quota_hit_at = time.time()
                     # only learn *higher* limits (supporters): a run started partway through
-                    # an hour sees fewer than the real allowance before being refused
-                    if self.batch_done > self.hourly_limit:
+                    # an hour sees fewer than the real allowance before being refused.
+                    # hourly_limit is None when mirrors are doing the work and we only fell
+                    # back to the website for this one map.
+                    if self.hourly_limit is None:
+                        self.hourly_limit = max(self.batch_done, DEFAULT_HOURLY_LIMIT)
+                    elif self.batch_done > self.hourly_limit:
                         self.hourly_limit = self.batch_done
                     self.limit_learned = True
                 wait = QUOTA_RETRY_WAITS[attempt % len(QUOTA_RETRY_WAITS)]
@@ -546,7 +773,7 @@ class Downloader:
                 self.retry_at = None
                 self._set(item, "downloading")
                 started = time.time()
-                ok, reason = self._download_one(driver, item, timeout)
+                ok, reason = self._download_one(item, timeout)
             if ok and self.quota_hit_at:
                 self.log("ok", "osu! is accepting downloads again.")
                 self.quota_hit_at, self.retry_attempt, self.batch_done = None, 0, 0
@@ -581,11 +808,36 @@ class Downloader:
             other = f"osu!{used}" if used != "default" else "the default app"
             self.log("warn", f"osu!{wanted} isn't installed, so importing with {other} instead.")
 
-    def _download_one(self, driver, item, timeout):
+    def _download_one(self, item, timeout):
+        """Download one set. Returns (path, '') or (None, reason)."""
         sid = item["id"]
         existing = find_osz(self.folder, sid)
         if existing:
             return existing, ""
+        if self.mirror_first:
+            path, who = download_from_mirror(sid, self.folder, item,
+                                             no_video=bool(self.opts.get("no_video")),
+                                             timeout=timeout, stop=self.stop_flag)
+            if path:
+                if who != self.mirror_used:  # say which mirror once, not on every map
+                    self.mirror_used = who
+                    self.log("info", f"Downloading from {who}.")
+                return path, ""
+            if who == "Cancelled." or self.stop_flag.is_set():
+                return None, "Cancelled."
+            if not self.allow_browser:
+                return None, who
+            self.log("warn", f"{sid}: {who} Trying osu.ppy.sh instead.")
+        return self._download_via_browser(item, timeout)
+
+    def _download_via_browser(self, item, timeout):
+        sid = item["id"]
+        try:
+            driver = self._ensure_browser()
+        except PermissionError:
+            raise
+        except Exception as e:
+            return None, friendly_error(e)
 
         # close stray tabs a download might have opened
         while len(driver.window_handles) > 1:

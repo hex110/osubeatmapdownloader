@@ -211,9 +211,9 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
 
 <!-- STEP 1 -->
 <section class="card" id="step1">
-  <h2><span class="n" id="n1">1</span> Sign in to osu!</h2>
+  <h2><span class="n" id="n1">1</span> Sign in to osu! <span class="badge" id="optionalBadge" hidden>Optional</span></h2>
   <div id="loginForm">
-    <p class="sub">osu! only lets signed-in players download maps. Sign in once and the app remembers it on this computer.</p>
+    <p class="sub" id="loginWhy">osu! only lets signed-in players download maps. Sign in once and the app remembers it on this computer.</p>
     <div class="row" style="align-items:center">
       <button class="btn primary big" id="loginBtn" onclick="act('login')">Sign in with osu!</button>
       <span class="hint">Opens a Chrome window with osu!'s own sign-in page.</span>
@@ -286,6 +286,18 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
         <label class="f" for="limit" title="For Most played, this is your top N by play count">How many</label>
         <input id="limit" type="number" min="1" max="20000" value="100">
       </div>
+      <div style="width:120px" id="minPlaysBox">
+        <div class="flabel">
+          <label class="f" for="minPlays">Min. plays</label>
+          <i class="tip" tabindex="0" aria-label="About the minimum play count">i
+            <span class="tip-body" role="tooltip">
+              Stop once maps drop below this many plays. Use it instead of a fixed count to grab
+              <b>everything you actually played</b>, e.g. 5+ times. <b>0</b> means no limit.
+            </span>
+          </i>
+        </div>
+        <input id="minPlays" type="number" min="0" value="0">
+      </div>
       <button class="btn primary" id="fetchBtn" onclick="fetchMaps()">Find maps</button>
     </div>
   </div>
@@ -302,6 +314,38 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
   <details>
     <summary>Folders & options</summary>
     <div style="margin-top:14px">
+      <div class="field">
+        <span class="f" style="display:block">Download from
+          <i class="tip" tabindex="0" aria-label="About download sources">i
+            <span class="tip-body" role="tooltip">
+              <b>Mirrors</b> are community servers that host the same .osz files. They need no sign-in
+              and have no hourly limit, so they're roughly ten times faster.<br><br>
+              <b>osu.ppy.sh</b> downloads through a hidden browser using your own account, exactly as if
+              you clicked Download on the site. It's subject to osu!'s ~200/hour limit.
+            </span>
+          </i>
+        </span>
+        <div class="choice" role="radiogroup">
+          <label><input type="radio" name="source" value="mirror">
+            <span class="grow"><b>Beatmap mirrors<span class="badge">Fastest</span></b>
+              <small>catboy.best, osu.direct, beatconnect, nerinyan · no sign-in, no hourly limit</small></span></label>
+          <label><input type="radio" name="source" value="official">
+            <span class="grow"><b>osu.ppy.sh</b>
+              <small>Official downloads through your account · ~200 per hour</small></span></label>
+        </div>
+        <label class="check" id="fallbackBox" style="margin-top:10px"><input type="checkbox" data-opt="mirror_fallback">
+          <span>Fall back to osu.ppy.sh<small>If no mirror has a map, fetch it from the website (needs sign-in)</small></span></label>
+      </div>
+      <div class="field">
+        <label class="f" for="lazerDir">osu!lazer library <span style="font-weight:400">(skips maps lazer already has)</span></label>
+        <div class="row">
+          <input id="lazerDir" type="text" class="grow" placeholder="Found automatically" onchange="saveSettings({lazer_dir: this.value})">
+          <button class="btn" onclick="browse('lazerDir', 'Select the osu!lazer data folder')">Browse…</button>
+          <button class="btn ghost" onclick="api('scan', {which: 'lazer'})">Scan</button>
+          <a class="btn ghost" href="/api/export?which=lazer" id="exportLazer" title="Save the IDs of every map in your lazer library">Export</a>
+        </div>
+        <div class="hint" id="lazerInfo" style="margin-top:6px"></div>
+      </div>
       <div class="field">
         <label class="f" for="folder">Save downloads to</label>
         <div class="row">
@@ -342,9 +386,13 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
       <div class="grid2">
         <label class="check"><input type="checkbox" data-opt="no_video"><span>Skip videos<small>Smaller downloads</small></span></label>
         <label class="check"><input type="checkbox" data-opt="auto_open"><span>Import as they finish<small>Sends each map to osu! right away</small></span></label>
-        <label class="check"><input type="checkbox" data-opt="show_browser"><span>Show the browser<small>For troubleshooting</small></span></label>
+        <label class="check" id="showBrowserBox"><input type="checkbox" data-opt="show_browser"><span>Show the browser<small>For troubleshooting</small></span></label>
+        <label class="check"><input type="checkbox" data-opt="notify"><span>Notify me when done<small>Desktop notification after a run</small></span></label>
       </div>
-      <div class="grid2">
+      <div class="grid2" id="mirrorPacing">
+        <div><label class="f">Seconds between maps</label><input type="number" min="0" step="0.5" data-opt="mirror_delay"></div>
+      </div>
+      <div class="grid2" id="officialPacing">
         <div><label class="f">Seconds between maps</label><input type="number" min="0" step="0.5" data-opt="delay"></div>
         <div><label class="f">Rest after every … maps</label><input type="number" min="1" data-opt="batch"></div>
         <div><label class="f">Rest length (s)</label><input type="number" min="0" data-opt="rest"></div>
@@ -450,7 +498,8 @@ function tab(name) {
 
 
 function fetchMaps() {
-  act('fetch', {user: $('userQuery').value, kind: $('kind').value, limit: +$('limit').value});
+  act('fetch', {user: $('userQuery').value, kind: $('kind').value, limit: +$('limit').value,
+                min_plays: $('kind').value === 'most_played' ? +$('minPlays').value : 0});
 }
 
 function pasteList() { act('paste', {text: $('pasteBox').value}); }
@@ -471,7 +520,8 @@ async function browse(inputId, title) {
     const {path} = await api('browse', {initial: $(inputId).value, title});
     if (!path) return;
     $(inputId).value = path;
-    saveSettings(inputId === 'folder' ? {folder: path} : {songs_dir: path});
+    saveSettings({folder: 'folder', songsDir: 'songs_dir', lazerDir: 'lazer_dir'}[inputId]
+      ? {[{folder: 'folder', songsDir: 'songs_dir', lazerDir: 'lazer_dir'}[inputId]]: path} : {});
   } catch {}
 }
 
@@ -491,6 +541,12 @@ document.querySelectorAll('[data-opt]').forEach(el => el.addEventListener('chang
 document.querySelectorAll('input[name=client]').forEach(el => el.addEventListener('change', () => {
   act('settings', {opts: {import_client: el.value}});
 }));
+document.querySelectorAll('input[name=source]').forEach(el => el.addEventListener('change', () => {
+  act('settings', {opts: {source: el.value}});
+}));
+$('kind').addEventListener('change', () => {
+  $('minPlaysBox').classList.toggle('hidden', $('kind').value !== 'most_played');
+});
 $('userQuery').addEventListener('keydown', e => e.key === 'Enter' && fetchMaps());
 
 function setFilter(f) { filter = f; listKey = ''; render(); }
@@ -575,6 +631,27 @@ function render() {
     if (el.type === 'checkbox') el.checked = !!S.opts[el.dataset.opt]; else setVal(el, S.opts[el.dataset.opt]);
   });
   $('exportLib').classList.toggle('hidden', !S.songs_dir);
+  setVal($('lazerDir'), S.lazer_dir);
+  $('exportLazer').classList.toggle('hidden', !S.lazer_found);
+  $('lazerInfo').innerHTML = S.lazer_found
+    ? `Found <code>${esc(S.lazer_found)}</code>` + (S.lazer_count
+        ? ` · <b>${S.lazer_count}</b> beatmap sets already in lazer, and they'll be skipped.`
+        : ` · press <b>Scan</b> to count what's already there.`)
+    : `<span class="missing">No osu!lazer library found.</span> Set it above if lazer is installed somewhere unusual.`;
+
+  // download source
+  const mirror = (S.opts.source || 'mirror') === 'mirror';
+  document.querySelectorAll('input[name=source]').forEach(el => el.checked = (el.value === 'mirror') === mirror);
+  $('mirrorPacing').classList.toggle('hidden', !mirror);
+  $('officialPacing').classList.toggle('hidden', mirror);
+  $('fallbackBox').classList.toggle('hidden', !mirror);
+  $('showBrowserBox').classList.toggle('hidden', mirror && !S.opts.mirror_fallback);
+  $('optionalBadge').hidden = !mirror;
+  $('loginWhy').textContent = mirror
+    ? 'Not needed for mirror downloads. Sign in only if you want to fall back to osu.ppy.sh for maps no mirror has.'
+    : 'osu! only lets signed-in players download maps. Sign in once and the app remembers it on this computer.';
+  $('minPlaysBox').classList.toggle('hidden', $('kind').value !== 'most_played');
+
   const client = S.opts.import_client || 'stable';
   document.querySelectorAll('input[name=client]').forEach(el => el.checked = el.value === client);
   for (const [c, id] of [['stable', 'whereStable'], ['lazer', 'whereLazer']]) {
@@ -603,8 +680,9 @@ function render() {
   $('bar').style.width = want ? (100 * finished / want) + '%' : '0';
 
   $('startBtn').classList.toggle('hidden', S.running);
-  $('startBtn').disabled = !signedIn || !c.queued;
-  $('startBtn').textContent = !signedIn ? 'Sign in first'
+  const needsLogin = !signedIn && !mirror;  // mirrors don't use your osu! account at all
+  $('startBtn').disabled = needsLogin || !c.queued;
+  $('startBtn').textContent = needsLogin ? 'Sign in first'
     : c.queued ? `Download ${c.queued} map${c.queued === 1 ? '' : 's'}` : 'Nothing to download';
   $('pauseBtn').classList.toggle('hidden', !S.running);
   $('pauseBtn').textContent = S.paused ? 'Resume' : 'Pause';

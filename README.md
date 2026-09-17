@@ -36,18 +36,22 @@ without needing any coding knowledge.
 So far, this is still the best way that I know of to recover lost beatmaps folders. This tool is also a great way to download anyone else's maps, like your favourite pro player's most played list.
 
 > [!NOTE]
-> **All beatmaps are downloaded directly from [osu.ppy.sh](https://osu.ppy.sh), the official osu! website,
-> using your own account.** No third-party mirrors or other download sites are used.
+> **Where maps come from is your choice.** By default the app uses public **beatmap mirrors**
+> (catboy.best, osu.direct, beatconnect.io, nerinyan.moe), which need no osu! account and have no
+> hourly limit. Switch *Download from* to **osu.ppy.sh** in *Folders & options* to fetch every map
+> from the official site using your own account instead.
 
 ## Features
 
 - **Grab whole lists at once.** A player's *most played*, *favourites*, *ranked*, *loved*, *guest* or *graveyard* maps. You can also paste IDs/links or open a `.txt` a friend sent you.
-- **Top N, not everything.** *Most played* is ordered by play count, so *How many* gives you exactly your top N maps, with the play count shown on every row.
-- **Runs invisibly.** Chrome works in the background (headless). No windows popping up, no need to close your browser first.
-- **Skips what you already have.** Maps in your osu!stable `Songs` folder, in the download folder, or downloaded in an earlier session.
+- **Top N, not everything.** *Most played* is ordered by play count, so *How many* gives you exactly your top N maps, with the play count shown on every row. Or set a **minimum play count** and take everything you actually played.
+- **Fast by default.** Maps come from public **beatmap mirrors**: no sign-in, no browser and no hourly limit, which is roughly **ten times faster**. Switch to official osu.ppy.sh downloads whenever you prefer.
+- **Runs invisibly.** When the website is used, Chrome works in the background (headless). No windows popping up, no need to close your browser first.
+- **Skips what you already have.** Maps in your **osu!lazer library**, your osu!stable `Songs` folder, the download folder, or downloaded in an earlier session.
+- **Picks up where it left off.** The queue is saved, so closing the app mid-run doesn't lose your place.
+- **Tells you when it's done.** A desktop notification at the end of a long run.
 - **One-click import** into **osu!stable** or **osu!lazer**, or automatically as each map finishes.
-- **Official downloads only.** Every map comes straight from osu.ppy.sh, exactly as if you clicked Download yourself.
-- **Handles osu!'s hourly limit for you.** When osu! stops accepting downloads, the app waits and retries on its own, and the time estimate includes those waits. Pause, resume, stop and retry failed maps any time.
+- **Handles osu!'s hourly limit for you.** If you download from osu.ppy.sh and it stops accepting downloads, the app waits and retries on its own, and the time estimate includes those waits. Pause, resume, stop and retry failed maps any time.
 - **Portable.** Unzip and run. Settings, downloads and everything else stay inside the app's folder.
 - **Share your library.** Export your Songs folder as an ID list your friends can load.
 
@@ -64,6 +68,7 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 A black window opens (that's the app: keep it open while downloading and close it to quit) and your browser shows the interface.
 
 > [!IMPORTANT]
+> **This applies to official downloads only** — mirrors have no such limit.
 > **osu! allows about 200 beatmap downloads per hour** (osu!supporters get more). This is a limit on osu!'s side,
 > and since every map comes from osu.ppy.sh, the app respects it. When you reach it, the app waits and retries
 > automatically after **5, 10, 20 and 25 minutes** (an hour in total), then carries on, repeating that cycle if it's
@@ -72,7 +77,10 @@ A black window opens (that's the app: keep it open while downloading and close i
 
 ## How to use it
 
-### 1. Sign in to osu!
+### 1. Sign in to osu! *(only for official downloads)*
+
+Mirror downloads need no osu! account, so you can skip to step 2. Sign in if you chose **osu.ppy.sh**
+as the source, or to let the app fall back to it for maps no mirror has.
 
 osu! only lets signed-in players download maps. Click **Sign in with osu!** and a Chrome window opens on osu!'s own
 sign-in page. Sign in there (including the captcha and any email code osu! asks for), then click **I've signed in**
@@ -95,13 +103,36 @@ Type a player name (or leave it empty for yourself), pick a list and how many ma
 Set it to 50 for a quick refresher, or to a few thousand to pull a whole library back. Each row shows how
 many times you played the map, so you can see where the list is cut off.
 
+**Min. plays** cuts the list by play count instead of by a fixed number: set it to `5` to get every map
+you played at least five times, however many that turns out to be. `0` turns it off.
+
 > [!TIP]
 > **Recovering a lost library?** Choose **Most played**. It includes every beatmap you've played at least once, so
 > leave Player empty and set *How many* high enough to cover your whole collection.
 
-Open **Folders & options** to choose where maps are saved, point the app at your osu!stable `Songs` folder so it skips maps you own, and pick which osu! to import into:
+Open **Folders & options** to choose the download source and where maps are saved, and to pick which
+osu! to import into. The app finds your **osu!lazer library** on its own and skips anything already in
+it; point it at an osu!stable `Songs` folder to skip those too.
 
 <img src="docs/images/options.png" width="660" alt="Options: download folder, Songs folder, import into osu!stable (recommended) or osu!lazer">
+
+<details>
+<summary><b>Mirrors or osu.ppy.sh?</b></summary>
+
+<br>
+
+**Mirrors are the default and much faster.** They're community servers hosting the same `.osz`
+files, so no osu! account, no browser and no hourly limit are involved: about **1.5 seconds per
+map** instead of an hour per 200. The app tries catboy.best, osu.direct, beatconnect.io and
+nerinyan.moe in turn, so one being down doesn't stop a run.
+
+Choose **osu.ppy.sh** if you'd rather every map come from the official site through your own
+account. It's slower and capped, but it's exactly what clicking Download on the website does.
+
+With mirrors selected you can also tick **Fall back to osu.ppy.sh**, which fetches anything no
+mirror has (very new or unranked maps) through the website. That needs you to be signed in.
+
+</details>
 
 <details>
 <summary><b>osu!stable or osu!lazer?</b></summary>
@@ -131,6 +162,8 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 
 | Problem | Fix |
 |---|---|
+| **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
+| **Maps in lazer aren't being skipped** | Press **Scan** next to *osu!lazer library*. If it says the folder wasn't found, set it manually — it's the folder holding `files` and `client.realm`. |
 | **"No download button"** for some maps | Turn on **Show explicit content** in your [osu! account settings](https://osu.ppy.sh/home/account/edit). Otherwise the map may have been removed. |
 | **"osu!'s hourly download limit reached"** | Expected after about 200 maps in an hour. The app retries the same map after 5, 10, 20 and 25 minutes and continues once osu! allows it, so just leave it running. Skipping to other maps doesn't help: the limit is per account, not per map. |
 | **"You're signed out of osu!"** | Your saved sign-in expired (after about a month) or you signed out. Click **Sign in with osu!** again. |
@@ -148,15 +181,20 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 flowchart LR
     UI["Your browser<br/>(the app's UI)"] <-->|127.0.0.1 only| App["Local app<br/>(Python)"]
     App -->|profile lists| API["osu! website"]
-    App -->|drives| Chrome["Headless Chrome<br/>using your saved sign-in"]
+    App -->|.osz files, the fast path| Mirrors["Beatmap mirrors"]
+    Mirrors --> Folder["downloads folder"]
+    App -.->|only for osu.ppy.sh downloads| Chrome["Headless Chrome<br/>using your saved sign-in"]
     Chrome -->|clicks Download| API
-    Chrome -->|.osz files| Folder["downloads folder"]
+    Chrome -->|.osz files| Folder
     Folder -->|Import| Osu["osu!stable / osu!lazer"]
 ```
 
-osu! doesn't hand out direct download links to scripts, so the app does what you'd do by hand: a hidden Chrome
-opens each beatmap page and clicks **Download**. [Selenium](https://www.selenium.dev/) controls Chrome and
-fetches a ChromeDriver that matches your Chrome version automatically.
+Mirrors serve `.osz` files over ordinary HTTP, so that path is a plain download with no browser involved.
+
+osu! itself doesn't hand out direct download links to scripts, so for official downloads the app does what
+you'd do by hand: a hidden Chrome opens each beatmap page and clicks **Download**.
+[Selenium](https://www.selenium.dev/) controls Chrome and fetches a matching ChromeDriver automatically.
+Chrome is only started if a download actually needs it.
 
 Everything stays on your machine. The interface is served only on `127.0.0.1`, requests from other websites are
 rejected, and your osu! session is only ever sent to osu!'s own servers (`*.ppy.sh`).
@@ -173,7 +211,7 @@ osu! Beatmap Downloader\
 ├── osu! Beatmap Downloader.exe
 ├── README.txt
 ├── runtime\      the app itself (Python, Selenium, UI)
-├── data\         settings, saved sign-in (Chrome profile), download history, ChromeDriver
+├── data\         settings, saved sign-in (Chrome profile), download history, saved queue, ChromeDriver
 └── downloads\    .osz files waiting to be imported
 ```
 
@@ -243,7 +281,7 @@ Double-click **`build.bat`**. It produces:
 | Path | What it is |
 |---|---|
 | [`app.py`](app.py) | Local web server and the actions behind every button |
-| [`osu_core.py`](osu_core.py) | osu! profile lists, headless Chrome downloader, osu!stable/lazer detection |
+| [`osu_core.py`](osu_core.py) | osu! profile lists, beatmap mirrors, headless Chrome downloader, osu!stable/lazer detection and library scanning |
 | [`web/index.html`](web/index.html) | The whole interface, in plain HTML, CSS and JavaScript |
 | [`build.bat`](build.bat) · [`tools/`](tools) · [`assets/`](assets) | Release packaging (PyInstaller) and the app icon |
 | [`start.bat`](start.bat) · [`start.sh`](start.sh) | Run-from-source launchers for Windows, and for Linux/macOS |
