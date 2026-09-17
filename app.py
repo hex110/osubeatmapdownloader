@@ -527,15 +527,21 @@ def act_open_all(_):
 
     def run():
         S.log("info", f"Sending {len(files)} maps to osu!{client}…")
-        used = client
-        for i, f in enumerate(files, 1):
-            used = core.import_into_osu(f, client, S.songs_dir, S.osu_paths)
-            S.busy = f"Importing… {i}/{len(files)}"
-            time.sleep(0.4 if i > 1 else 3)  # give osu! a moment to start before sending the rest
+        used, failed, sent = client, [], 0
+        for start in range(0, len(files), core.IMPORT_BATCH):
+            batch = files[start:start + core.IMPORT_BATCH]
+            used, bad = core.import_batch(batch, client, S.songs_dir, S.osu_paths, log=S.log)
+            failed += bad
+            sent += len(batch)
+            S.busy = f"Importing… {sent}/{len(files)}"
         if used != client:
             S.log("warn", f"osu!{client} isn't installed, so the maps went to "
                           f"{'osu!' + used if used != 'default' else 'the default app'} instead.")
-        S.log("ok", "Handed everything to osu!, which will finish importing on its own.")
+        if failed:
+            S.log("warn", f"{len(failed)} map(s) weren't accepted. They're still in the download "
+                          f"folder, so you can press Import again.")
+        S.log("ok", f"Handed {len(files) - len(failed)} maps to osu!, "
+                    f"which will finish importing on its own.")
     in_background("Importing…", run)
 
 
@@ -732,6 +738,11 @@ def main():
     if stopped:
         S.log("info", f"Closed {stopped} leftover Chrome process(es) from an earlier session.")
     for leftover in TEMP_DIR.iterdir():
+        # Never clear something another program is still living in. An osu!lazer started by
+        # an earlier run of this app used to mount its AppImage in here, and wiping that out
+        # from under it left a running lazer that silently refused every import.
+        if os.path.ismount(leftover) or leftover.name.startswith(".mount_"):
+            continue
         try:
             shutil.rmtree(leftover) if leftover.is_dir() else leftover.unlink()
         except OSError:

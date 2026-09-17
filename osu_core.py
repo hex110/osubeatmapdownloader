@@ -758,6 +758,8 @@ class Downloader:
         self.mirror_first = opts.get("source", "mirror") == "mirror"
         self.allow_browser = not self.mirror_first or bool(opts.get("mirror_fallback", True))
         self.mirror_used = None
+        self.pending_import = []   # finished maps waiting to go to osu! as one batch
+        self.failed_import = []
         # progress/ETA bookkeeping, read by the UI
         self.batch_done = 0             # downloads since the last time osu! let us resume
         self.batch_started_at = None    # time of the batch's first download
@@ -870,6 +872,11 @@ class Downloader:
             for item in self.items:
                 if item["status"] in ("queued", "downloading"):
                     self._set(item, "cancelled" if self.stop_flag.is_set() else "failed")
+            if self.opts.get("auto_open"):
+                self._flush_imports()  # whatever didn't fill a batch
+            if self.failed_import:
+                self.log("warn", f"{len(self.failed_import)} map(s) downloaded but not imported. "
+                                 f"They're still in the download folder: press “Import all into osu!”.")
             self.log("info", "Stopped." if self.stop_flag.is_set() else "All done.")
             if self.on_finish:
                 # the last status changes may have been inside the save throttle, so make
@@ -958,7 +965,9 @@ class Downloader:
                 self.per_map = took if self.per_map is None else self.per_map * 0.9 + took * 0.1
                 self._set(item, "done", file=ok, error="")
                 if self.opts.get("auto_open"):
-                    self._import(ok)
+                    self.pending_import.append(ok)
+                    if len(self.pending_import) >= IMPORT_BATCH:
+                        self._flush_imports()
             else:
                 fails_in_row += 1
                 self._set(item, "failed", error=reason)
@@ -972,9 +981,16 @@ class Downloader:
             if not self._sleep(delay):
                 return
 
-    def _import(self, path):
+    def _flush_imports(self):
+        """Send everything downloaded since the last batch to osu! in one go."""
+        batch, self.pending_import = self.pending_import, []
+        if not batch:
+            return
         wanted = self.opts.get("import_client", "stable")
-        used = import_into_osu(path, wanted, self.opts.get("songs_dir", ""), self.opts.get("osu_paths"))
+        self.log("info", f"Importing {len(batch)} map{'' if len(batch) == 1 else 's'} into osu!{wanted}…")
+        used, failed = import_batch(batch, wanted, self.opts.get("songs_dir", ""),
+                                    self.opts.get("osu_paths"), log=self.log)
+        self.failed_import += failed
         if used != wanted and not self.warned_client:
             self.warned_client = True
             other = f"osu!{used}" if used != "default" else "the default app"
@@ -1450,6 +1466,123 @@ def _launch_osu(exe, path):
     extra = ({"creationflags": CREATE_BREAKAWAY_FROM_JOB} if os.name == "nt"
              else {"start_new_session": True})  # osu! keeps running after the app closes
     subprocess.Popen(cmd, env=env, cwd=cwd, **extra)
+
+
+IMPORT_BATCH = 15          # .osz files handed to one client invocation
+IMPORT_ACK_TIMEOUT = 120   # a running client should answer an import far quicker than this
+
+
+def _osu_pid():
+    """PID of a running osu!lazer, or None. Linux only; elsewhere we can't tell."""
+    if not Path("/proc").is_dir():
+        return None
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            if Path(entry.path, "comm").read_text().strip() == "osu!":
+                return int(entry.name)
+        except OSError:
+            continue
+    return None
+
+
+def _listen_port(pid):
+    """The loopback port a process is listening on, by matching socket inodes to its fds."""
+    try:
+        fds = {os.readlink(f"/proc/{pid}/fd/{fd}") for fd in os.listdir(f"/proc/{pid}/fd")}
+        lines = Path(f"/proc/{pid}/net/tcp").read_text().splitlines()[1:]
+    except OSError:
+        return None
+    for line in lines:
+        cols = line.split()
+        if len(cols) > 9 and cols[3] == "0A" and f"socket:[{cols[9]}]" in fds:  # 0A = LISTEN
+            return int(cols[1].split(":")[1], 16)
+    return None
+
+
+def wait_for_osu(timeout=120, stop=None):
+    """Wait until a just-launched osu!lazer can accept imports over its IPC socket.
+
+    It binds the socket early in startup, well before the menu appears, so this usually
+    returns in well under a second.
+    """
+    import socket as socketlib
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if stop is not None and stop.is_set():
+            return False
+        pid = _osu_pid()
+        port = _listen_port(pid) if pid else None
+        if port:
+            try:
+                socketlib.create_connection(("127.0.0.1", port), 2).close()
+                return True
+            except OSError:
+                pass
+        time.sleep(0.5)
+    return False
+
+
+def import_batch(paths, client, songs_dir="", custom_paths=None, log=None):
+    """Hand several .osz files to osu! at once. Returns (client used, files that failed).
+
+    One osu!lazer invocation per beatmap is a bad deal on Linux: each one mounts the
+    AppImage and starts a whole .NET runtime just to pass a filename over IPC, and a running
+    lazer only has a few seconds to acknowledge before the sender aborts. Sending a batch
+    through a single process is far cheaper and far less likely to time out.
+    """
+    paths = [str(p) for p in paths]
+    if not paths:
+        return client, []
+    other = "lazer" if client == "stable" else "stable"
+    for candidate in (client, other):
+        exe = find_osu(candidate, songs_dir, (custom_paths or {}).get(candidate, ""))
+        if not exe:
+            continue
+        native = os.name != "nt" and not str(exe).startswith(FLATPAK_PREFIX) \
+            and Path(exe).suffix.lower() != ".exe"
+        if not native or _osu_pid() is None:
+            # nothing is running yet (or this isn't a shape we can talk to): the launch
+            # becomes the game itself, so it must not be waited on
+            for path in paths:
+                _launch_osu(exe, path)
+                time.sleep(0.4)
+            if native:
+                wait_for_osu()
+            return candidate, []
+        return candidate, _send_to_running_osu(exe, paths, log)
+    open_file(paths[0])
+    return "default", []
+
+
+def _send_to_running_osu(exe, paths, log=None):
+    """Pass files to an already-running osu! and report the ones it didn't take."""
+    import subprocess
+    failed = []
+    for attempt in range(2):
+        try:
+            result = subprocess.run([str(exe), *paths], env=_child_env(),
+                                    cwd=str(Path(exe).parent), capture_output=True,
+                                    text=True, timeout=IMPORT_ACK_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            result = None
+        if result is not None and result.returncode == 0:
+            return []
+        # osu! aborts (and dumps core) when it can't hand a file over in time, which says
+        # nothing about the files themselves, so it is worth one more try
+        if attempt == 0:
+            if log:
+                log("info", f"osu! didn't accept {len(paths)} map(s) yet; trying once more.")
+            time.sleep(5)
+            continue
+        failed = list(paths)
+        if log:
+            detail = (result.stderr or "").strip().splitlines()
+            why = next((l for l in detail if "Exception" in l), detail[0] if detail else "no reason given")
+            log("warn", f"osu! wouldn't import {len(paths)} map(s): {why[:120]} "
+                        f"They're still in the download folder, so “Import all into osu!” can retry.")
+    return failed
 
 
 def import_into_osu(path, client, songs_dir="", custom_paths=None):
