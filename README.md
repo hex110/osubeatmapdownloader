@@ -50,6 +50,7 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 - **Skips what you already have.** Maps in your **osu!lazer library**, your osu!stable `Songs` folder, the download folder, or downloaded in an earlier session. Even maps too old to carry a beatmap ID, which are matched by artist, title and mapper.
 - **Signs in through your own browser.** No separate Chrome window to hunt for, and nothing to do at all if you're already signed in to osu! there.
 - **Picks up where it left off.** The queue is saved, so closing the app mid-run doesn't lose your place.
+- **Never hangs on one map.** A download that stops making progress for 10 seconds is abandoned and the next mirror is tried, so one bad server can't stall a long queue.
 - **Tells you when it's done.** A desktop notification at the end of a long run.
 - **One-click import** into **osu!stable** or **osu!lazer**, or automatically as each map finishes.
 - **Handles osu!'s hourly limit for you.** If you download from osu.ppy.sh and it stops accepting downloads, the app waits and retries on its own, and the time estimate includes those waits. Pause, resume, stop and retry failed maps any time.
@@ -169,6 +170,7 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 | Problem | Fix |
 |---|---|
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
+| **A map seems stuck** | It gives up on its own after 10 seconds without progress and moves to the next mirror. Change that with **Give up if stuck for** in *Folders & options*. Big maps are safe: the clock measures time *without data*, not total download time. |
 | **Maps in lazer aren't being skipped** | Press **Scan** next to *osu!lazer library*. If it says the folder wasn't found, set it manually — it's the folder holding `files` and `client.realm`. |
 | **A few old maps still aren't skipped** | Maps saved before osu! file format v10 carry no beatmap ID, so they're matched on artist/title/creator instead. That needs the metadata a profile list provides, so it can't work for a queue built by **pasting bare IDs**. |
 | **"Couldn't find an osu! sign-in in your browser"** | Sign in to osu! in your browser first, or use *Use a separate Chrome window instead*. Chromium-based browsers encrypt their cookies and always need that route. |

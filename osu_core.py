@@ -5,6 +5,7 @@ Everything that talks to osu.ppy.sh lives here; app.py only wires it to the UI.
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -167,14 +168,27 @@ def _osz_name(sid, disposition, item):
     return name[:180]
 
 
-def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, stop=None):
+# A stalled download is one that stops making progress, not just a slow one: beatmaps run
+# well past 20 MB, so capping the total time would fail perfectly good downloads on a slow
+# link. Everything below measures the gap between bytes instead.
+DEFAULT_STALL = 10
+TRICKLE_FLOOR = 1024  # bytes/sec below which a download is stuck rather than merely slow
+
+
+class _Stalled(Exception):
+    """A download that stopped making progress."""
+
+
+def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, stop=None,
+                         stall=DEFAULT_STALL):
     """Fetch one beatmapset from the first mirror that has it.
 
     Returns (path, mirror name) on success or (None, reason). Tries every mirror before
-    giving up, so one being down or missing a map doesn't fail the download.
+    giving up, so one being down, missing a map or hanging doesn't fail the download.
     """
     item = item or {}
     reason, absent = "No mirror had this beatmap.", 0
+    stall = max(1, float(stall or DEFAULT_STALL))
     for name, full_url, novideo_url in MIRRORS:
         if stop is not None and stop.is_set():
             return None, "Cancelled."
@@ -182,18 +196,29 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
         tmp = None
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            # the socket timeout covers connecting and each individual read, so a mirror
+            # that accepts the connection and then goes quiet trips it
+            with urllib.request.urlopen(req, timeout=stall) as r:
                 ctype = (r.headers.get("Content-Type") or "").lower()
                 if "html" in ctype or "json" in ctype:
                     reason, absent = f"{name}: doesn't have this beatmap.", absent + 1
                     continue
-                first = r.read(65536)
+                # read1() hands back whatever has arrived instead of blocking until the
+                # buffer is full, which is what lets the stall checks below run at all
+                first = r.read1(65536)
+                if len(first) == 1:
+                    first += r.read1(65536)  # a tiny opening segment; get one more
                 if not first.startswith(b"PK"):  # every .osz is a zip
                     reason = f"{name}: didn't send a beatmap file."
                     continue
                 target = Path(folder) / _osz_name(sid, r.headers.get("Content-Disposition"), item)
                 tmp = target.with_name(target.name + ".part")
                 size = 0
+                # a mirror can also dribble bytes out slowly enough that the socket timeout
+                # never fires, which hangs the queue just as badly. Measure that over a
+                # sliding window: an average taken from the start would let a fast opening
+                # burst hide a stall that begins a minute later.
+                window_start, window_bytes = time.time(), 0
                 with open(tmp, "wb") as f:
                     chunk = first
                     while chunk:
@@ -201,7 +226,12 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
                             raise _Cancelled
                         f.write(chunk)
                         size += len(chunk)
-                        chunk = r.read(262144)
+                        window_bytes += len(chunk)
+                        if time.time() - window_start > stall:
+                            if window_bytes < TRICKLE_FLOOR * stall:
+                                raise _Stalled
+                            window_start, window_bytes = time.time(), 0
+                        chunk = r.read1(262144)
             if size < 1024:
                 reason = f"{name}: sent an empty file."
                 tmp.unlink(missing_ok=True)
@@ -210,6 +240,10 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
             return str(target), name
         except _Cancelled:
             return None, "Cancelled."
+        except _Stalled:
+            reason = f"{name}: stalled (barely any data for {stall:g}s)."
+        except (TimeoutError, socket.timeout):
+            reason = f"{name}: no response for {stall:g}s."
         except urllib.error.HTTPError as e:
             absent += e.code == 404
             reason = f"{name}: " + ("doesn't have this beatmap." if e.code == 404 else f"HTTP {e.code}.")
@@ -355,6 +389,7 @@ def make_driver(download_dir=None, headless=True, profile_dir=None):
         from selenium.webdriver.chrome.service import Service
         service = Service(executable_path=local)
     driver = webdriver.Chrome(options=opts, service=service)
+    driver.set_page_load_timeout(60)  # never let one wedged page stop the whole queue
     if download_dir:
         driver.execute_cdp_cmd("Browser.setDownloadBehavior",
                                {"behavior": "allow", "downloadPath": str(download_dir)})
@@ -954,7 +989,8 @@ class Downloader:
         if self.mirror_first:
             path, who = download_from_mirror(sid, self.folder, item,
                                              no_video=bool(self.opts.get("no_video")),
-                                             timeout=timeout, stop=self.stop_flag)
+                                             timeout=timeout, stop=self.stop_flag,
+                                             stall=self.opts.get("stall", DEFAULT_STALL))
             if path:
                 if who != self.mirror_used:  # say which mirror once, not on every map
                     self.mirror_used = who
@@ -982,7 +1018,10 @@ class Downloader:
             driver.close()
         driver.switch_to.window(driver.window_handles[0])
 
-        driver.get(f"{OSU}/beatmapsets/{sid}")
+        try:
+            driver.get(f"{OSU}/beatmapsets/{sid}")
+        except Exception:
+            return None, "The beatmap page didn't load in time."
         href = None
         for _ in range(20):  # page is rendered client-side; wait for the button
             href = driver.execute_script(CLICK_DOWNLOAD_JS, sid, bool(self.opts.get("no_video")))
@@ -1004,20 +1043,30 @@ class Downloader:
             return None, "No download button (map may be unavailable, or explicit content is hidden in your osu! settings)."
 
         # wait for the .osz to appear and finish
+        stall = max(1, float(self.opts.get("stall", DEFAULT_STALL)))
         start = time.time()
+        moved_at, last_size = start, -1
         while time.time() - start < timeout:
             if self.stop_flag.is_set():
                 return None, "Cancelled."
             done = find_osz(self.folder, sid)
             if done:
                 return done, ""
-            if time.time() - start > 1 and not any(self.folder.glob("*.crdownload")):
+            partials = list(self.folder.glob("*.crdownload"))
+            if time.time() - start > 1 and not partials:
                 # a refused download replaces the page with osu!'s "too many requests" page
                 text = (driver.execute_script(
                     "return document.title + ' ' + (document.body ? document.body.innerText.slice(0, 500) : '')") or "").lower()
                 if "quota" in text or "too many requests" in text:
                     driver.back()
                     return None, "osu! download quota reached."
+            # Chrome writes into a .crdownload as it goes; if that stops growing the
+            # download is stuck, and there's no point waiting out the whole timeout
+            size = sum(f.stat().st_size for f in partials if f.exists()) if partials else -1
+            if size != last_size:
+                moved_at, last_size = time.time(), size
+            elif time.time() - moved_at > stall:
+                return None, f"Download stalled (no progress for {stall:g}s)."
             time.sleep(0.5)
         return None, "Timed out waiting for the download."
 
@@ -1218,11 +1267,21 @@ def friendly_error(e):
 # ---------------------------------------------------------------- osu! clients
 
 def _child_env():
-    """Environment for programs we launch: undo app.py's TEMP redirect so osu! uses the real one."""
+    """Environment for programs we launch: undo app.py's temp redirect so osu! uses the real one.
+
+    This matters more than it looks on Linux: osu!lazer ships as an AppImage, and an AppImage
+    mounts its own squashfs under TMPDIR. Leave the redirect in place and lazer mounts itself
+    inside the app's data/temp, where the next startup then can't clear it.
+    """
     env = dict(os.environ)
-    for key in ("TEMP", "TMP"):
-        if env.get(f"OBD_ORIGINAL_{key}"):
-            env[key] = env[f"OBD_ORIGINAL_{key}"]
+    for key in ("TEMP", "TMP", "TMPDIR"):
+        original = env.pop(f"OBD_ORIGINAL_{key}", None)
+        if original is None:
+            continue
+        if original:
+            env[key] = original
+        else:
+            env.pop(key, None)  # it simply wasn't set before we redirected it
     return env
 
 

@@ -61,7 +61,9 @@ PREFERRED_PORT = 8765
 DEFAULT_OPTS = {"no_video": False, "auto_open": False, "import_client": "stable", "show_browser": False,
                 "delay": 5, "batch": 60, "rest": 15, "cooldown": 300, "timeout": 90,
                 # mirrors are the default source: no sign-in, no browser, no hourly limit
-                "source": "mirror", "mirror_fallback": True, "mirror_delay": 1, "notify": True}
+                "source": "mirror", "mirror_fallback": True, "mirror_delay": 1, "notify": True,
+                # give up on a download that stops making progress for this long
+                "stall": core.DEFAULT_STALL}
 
 
 def _load(path, default):
