@@ -160,6 +160,128 @@ def fetch_collection(text, limit=20000, on_progress=None):
             "unsubmitted": info.get("unsubmittedBeatmapCount") or 0}, out
 
 
+# ---------------------------------------------------------------- matching songs to beatmaps
+#
+# Turning "Artist - Title" into a beatmap is guesswork: the same song exists as a dozen
+# different maps, plus remixes, TV-size cuts and covers that read almost identically. So this
+# ranks candidates and hands them to the user to confirm rather than picking silently.
+
+SEARCH_PROVIDERS = ("https://catboy.best/api/search", "https://osu.direct/api/search")
+SEARCH_STATUS = {-2: "graveyard", -1: "wip", 0: "pending", 1: "ranked",
+                 2: "approved", 3: "qualified", 4: "loved"}
+GOOD_STATUS = (1, 2, 4)      # ranked, approved, loved
+MATCH_FLOOR = 0.55           # below this the names simply don't agree
+
+
+def _norm_song(text):
+    """Normalise a title or artist so near-identical names compare equal."""
+    text = (text or "").casefold()
+    text = re.sub(r"[(\[][^)\]]*[)\]]", " ", text)          # (TV Size), [Remix], ...
+    text = re.sub(r"\b(feat|ft|featuring|with|vs)\b.*", " ", text)
+    text = re.sub(r"[^\w\s]", " ", text)                    # punctuation varies wildly
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def parse_tracks(text):
+    """[(artist, title)] from a pasted track list or an exported playlist CSV.
+
+    Handles the CSV that playlist exporters produce, and plain "Artist - Title" lines.
+    """
+    import csv
+    import io
+    lines = [l for l in (text or "").splitlines() if l.strip()]
+    if not lines:
+        return []
+    # a CSV export: find the artist and title columns by name
+    if lines[0].count(",") >= 2 and '"' in lines[0] or "track name" in lines[0].casefold():
+        try:
+            rows = list(csv.DictReader(io.StringIO("\n".join(lines))))
+        except csv.Error:
+            rows = []
+        if rows:
+            def column(row, *wanted):
+                for key in row:
+                    name = (key or "").casefold().strip()
+                    if any(w in name for w in wanted):
+                        return (row[key] or "").strip()
+                return ""
+            out = []
+            for row in rows:
+                title = column(row, "track name", "song", "title")
+                artist = column(row, "artist name", "artist")
+                if title:
+                    out.append((artist.split(",")[0].strip(), title))
+            if out:
+                return out
+    out = []
+    for line in lines:
+        line = re.sub(r"^\s*\d+[.)]\s*", "", line.strip())   # "1. Artist - Title"
+        parts = re.split(r"\s+[-\u2013\u2014]\s+", line, maxsplit=1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            out.append((parts[0].strip(), parts[1].strip()))
+        elif line:
+            out.append(("", line))  # no separator: treat the whole line as a title
+    return out
+
+
+def search_beatmaps(query, amount=8):
+    """Candidate beatmap sets for a search string, from whichever mirror answers."""
+    last = None
+    for provider in SEARCH_PROVIDERS:
+        try:
+            rows = _get_json(f"{provider}?{urllib.parse.urlencode({'query': query, 'amount': amount})}")
+        except Exception as e:
+            last = e
+            continue
+        out = []
+        for row in rows if isinstance(rows, list) else []:
+            children = row.get("ChildrenBeatmaps") or []
+            out.append({
+                "id": str(row.get("SetID") or ""),
+                "artist": row.get("Artist") or "",
+                "title": row.get("Title") or "",
+                "creator": row.get("Creator") or "",
+                "status": SEARCH_STATUS.get(row.get("RankedStatus"), "unknown"),
+                "favourites": row.get("Favourites") or 0,
+                "plays": sum(b.get("Playcount") or 0 for b in children),
+                "diffs": len(children),
+            })
+        if out:
+            return [c for c in out if c["id"]]
+    if last:
+        raise last
+    return []
+
+
+def score_candidate(artist, title, candidate):
+    """How well a beatmap set matches a song: 0 to 1, with the name agreeing most."""
+    import math
+    from difflib import SequenceMatcher
+    ratio = lambda a, b: SequenceMatcher(None, a, b).ratio() if a and b else 0.0
+    title_score = ratio(_norm_song(title), _norm_song(candidate["title"]))
+    artist_score = ratio(_norm_song(artist), _norm_song(candidate["artist"])) if artist else title_score
+    text = 0.65 * title_score + 0.35 * artist_score
+    # among maps of the same song, the one people actually played is the one wanted
+    weight = candidate["plays"] + 50 * candidate["favourites"]
+    popularity = min(1.0, math.log10(1 + weight) / 6)
+    bonus = 0.05 if candidate["status"] in ("ranked", "approved", "loved") else 0.0
+    return round(min(1.0, 0.75 * text + 0.20 * popularity + bonus), 4), round(text, 4)
+
+
+def match_track(artist, title, amount=8):
+    """Search for one song and return its candidates, best first."""
+    query = f"{artist} {title}".strip() or title
+    candidates = search_beatmaps(query, amount=amount)
+    if not candidates and artist:
+        candidates = search_beatmaps(title, amount=amount)  # the artist name may differ on osu!
+    scored = []
+    for candidate in candidates:
+        score, text = score_candidate(artist, title, candidate)
+        scored.append({**candidate, "score": score, "text": text})
+    scored.sort(key=lambda c: c["score"], reverse=True)
+    return scored
+
+
 def scan_songs_folder(path):
     """Beatmapset IDs present in an osu!stable Songs folder (folders are named '<id> Artist - Title')."""
     ids = set()

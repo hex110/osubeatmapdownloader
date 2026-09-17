@@ -97,6 +97,8 @@ class State:
         self.owned_lazer = set()      # already imported into osu!lazer
         self.owned_lazer_keys = set()  # ...and the pre-v10 maps that carry no ID
         self.queue = self._restore_queue()
+        self.matches = []          # song -> candidate beatmaps, awaiting confirmation
+        self.match_total = 0
         self.queue_saved_at = 0
         self.logs = []
         self.busy = ""
@@ -238,6 +240,7 @@ class State:
                 "login_mode": "browser" if self.browser_login else "chrome",
                 "can_read_browser": self.can_read_browser(),
                 "folder": self.folder, "songs_dir": self.songs_dir, "opts": self.opts,
+                "match_done": len(self.matches), "match_total": self.match_total,
                 "lazer_dir": self.lazer_dir, "lazer_found": self.lazer_data_dir(),
                 "lazer_count": len(self.owned_lazer) + len(self.owned_lazer_keys),
                 "lazer_by_name": len(self.owned_lazer_keys),
@@ -395,6 +398,77 @@ def act_fetch(body):
         have = sum(1 for i in items if i["status"] == "have")
         S.log("ok", f"Found {len(items)} beatmap sets" + (f", {have} of which you already have." if have else "."))
     in_background("Fetching…", run)
+
+
+MAX_TRACKS = 500
+SEARCH_GAP = 0.25  # searches are cheap, but there's no reason to hammer a mirror with them
+
+
+def act_match(body):
+    """Look up a beatmap for every song in a pasted playlist, for the user to confirm."""
+    if S.running() or S.busy:
+        raise ValueError("Wait for the current download to finish first.")
+    tracks = core.parse_tracks(body.get("text", ""))
+    if not tracks:
+        raise ValueError("No songs found. Paste one 'Artist - Title' per line, or a playlist CSV.")
+    if len(tracks) > MAX_TRACKS:
+        tracks = tracks[:MAX_TRACKS]
+    with S.lock:
+        S.matches, S.match_total = [], len(tracks)
+
+    def run():
+        for i, (artist, title) in enumerate(tracks, 1):
+            try:
+                candidates = core.match_track(artist, title)[:6]
+            except Exception as e:
+                candidates = []
+                if i == 1:  # a dead search endpoint would otherwise repeat this 500 times
+                    S.log("warn", f"Beatmap search failed: {core.friendly_error(e)}")
+            good = candidates and candidates[0]["text"] >= core.MATCH_FLOOR
+            with S.lock:
+                S.matches.append({"artist": artist, "title": title, "candidates": candidates,
+                                  "pick": 0 if good else -1, "include": bool(good)})
+            S.busy = f"Matching… {i}/{len(tracks)}"
+            if i < len(tracks):
+                time.sleep(SEARCH_GAP)
+        found = sum(1 for m in S.matches if m["pick"] >= 0)
+        S.log("ok", f"Matched {found} of {len(tracks)} songs. Check the picks, then add them to the queue.")
+    in_background("Matching…", run)
+
+
+def act_match_pick(body):
+    """Choose a different beatmap for one song, or leave that song out."""
+    i, pick = int(body.get("i", -1)), int(body.get("pick", -1))
+    with S.lock:
+        if not 0 <= i < len(S.matches):
+            raise ValueError("No such song.")
+        row = S.matches[i]
+        row["pick"] = pick if 0 <= pick < len(row["candidates"]) else -1
+        row["include"] = row["pick"] >= 0 and bool(body.get("include", True))
+
+
+def act_match_queue(_):
+    """Put every confirmed match into the download queue."""
+    items, seen = [], set()
+    with S.lock:
+        for row in S.matches:
+            if not row["include"] or row["pick"] < 0:
+                continue
+            chosen = row["candidates"][row["pick"]]
+            if chosen["id"] in seen:
+                continue  # two songs can land on the same beatmap set
+            seen.add(chosen["id"])
+            items.append({"id": chosen["id"], "title": chosen["title"], "artist": chosen["artist"],
+                          "creator": chosen["creator"], "cover": "", "plays": 0})
+    if not items:
+        raise ValueError("Nothing confirmed yet: pick a beatmap for at least one song.")
+    S.set_queue(items)
+    S.log("ok", f"Queued {len(items)} beatmap sets from your playlist.")
+
+
+def act_clear_matches(_):
+    with S.lock:
+        S.matches, S.match_total = [], 0
 
 
 def act_collection(body):
@@ -644,7 +718,8 @@ def act_scan(body):
 
 ACTIONS = {
     "login": act_login, "cancel-login": act_cancel_login, "finish-login": act_finish_login, "logout": act_logout, "fetch": act_fetch, "paste": act_paste,
-    "collection": act_collection, "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
+    "collection": act_collection, "match": act_match, "match-pick": act_match_pick,
+    "match-queue": act_match_queue, "clear-matches": act_clear_matches, "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
     "retry": act_retry, "toggle": act_toggle, "clear-queue": act_clear_queue,
     "clear-history": act_clear_history, "open-all": act_open_all,
     "open-folder": act_open_folder, "browse": act_browse, "scan": act_scan,
@@ -682,6 +757,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, INDEX.read_bytes(), "text/html; charset=utf-8")
         if url.path == "/api/state":
             return self._send(200, S.snapshot(int(q.get("since", ["0"])[0])))
+        if url.path == "/api/matches":
+            with S.lock:
+                return self._send(200, {"matches": S.matches, "total": S.match_total})
         if url.path == "/api/export":
             which = q.get("which", ["all"])[0]
             if which == "library":

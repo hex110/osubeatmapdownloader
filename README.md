@@ -44,6 +44,7 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 ## Features
 
 - **Grab whole lists at once.** A player's *most played*, *favourites*, *ranked*, *loved*, *guest* or *graveyard* maps, or a shared **[osu!collector](https://osucollector.com) collection** — a farm list, a tournament pool, a friend's favourites. You can also paste IDs/links or open a `.txt` a friend sent you.
+- **Turn a playlist into beatmaps.** Paste songs (or a Spotify playlist exported to CSV) and the app finds the beatmap for each one, showing you its pick and the alternatives so you can correct it before downloading.
 - **Top N, not everything.** *Most played* is ordered by play count, so *How many* gives you exactly your top N maps, with the play count shown on every row. Or set a **minimum play count** and take everything you actually played.
 - **Fast by default.** Maps come from public **beatmap mirrors**: no sign-in, no browser and no hourly limit, which is roughly **ten times faster**. Switch to official osu.ppy.sh downloads whenever you prefer.
 - **Runs invisibly.** When the website is used, Chrome works in the background (headless). No windows popping up, no need to close your browser first.
@@ -105,8 +106,25 @@ The app doesn't control that window or read what you type.
 ### 2. Choose beatmaps
 
 Type a player name (or leave it empty for yourself), pick a list and how many maps you want. Or switch
-to **From a collection** and paste an [osu!collector](https://osucollector.com) link, or to **From a list**
-and paste IDs or links.
+to **From a collection** and paste an [osu!collector](https://osucollector.com) link, to **From a playlist**
+and paste songs, or to **From a list** and paste IDs or links.
+
+<details>
+<summary><b>From a playlist (Spotify and friends)</b></summary>
+
+<br>
+
+Export a playlist to CSV with a tool like [Exportify](https://exportify.net) and paste it in, or just type
+`Artist - Title` lines. Every song is searched on osu! and the most played matching beatmap is picked.
+
+**Check the picks before queueing.** A search can't tell a song from its remix, its TV-size cut or a cover,
+so each row has a dropdown with the other candidates (mapper, play count and ranked status shown) and a
+tick box to leave a song out. Songs with no convincing match are left unticked for you. The badge on each
+row says how well the names actually agreed: *good*, *check* or *unsure*.
+
+Nothing is downloaded until you press **Add to queue**, and everything you already own is skipped as usual.
+
+</details>
 
 **Most played** is ordered by play count, highest first, so *How many* = **your top N most played maps**.
 Set it to 50 for a quick refresher, or to a few thousand to pull a whole library back. Each row shows how
@@ -185,6 +203,7 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 
 | Problem | Fix |
 |---|---|
+| **A playlist song matched the wrong map** | Pick a different one from that row's dropdown, or untick the row. The list is sorted by how well the names matched and how played each map is. |
 | **A collection has maps nothing can download** | osu!collector collections can contain maps that were never submitted to osu!. The app says how many and skips them; they don't exist on any mirror. |
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
 | **osu!lazer says "IPC took too long"** | A lazer that was already running stopped accepting imports. Close and reopen lazer; the maps stay in the download folder, so **Import all into osu!** picks them up. |

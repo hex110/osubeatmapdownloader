@@ -148,6 +148,12 @@ kbd { background: var(--panel); border: 1px solid var(--line); border-bottom-wid
 .item .a a:hover { color: var(--pink); }
 .item .a .plays { color: var(--pink); font-weight: 700; }
 .item .err { color: var(--red); font-size: 12px; }
+.item.match { align-items: center; gap: 10px; }
+.item.match .pickbox { width: 100%; margin-top: 4px; font-size: 13px; padding: 5px 8px;
+  background: var(--panel-2); color: var(--fg); border: 1px solid var(--line); border-radius: 7px; }
+.pill.conf-ok { background: rgba(111,220,140,.15); color: var(--green); }
+.pill.conf-warn { background: rgba(255,193,94,.16); color: #e0a33c; }
+.pill.conf-low { background: rgba(255,107,122,.15); color: var(--red); }
 .pill { font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
 .s-queued .pill { background: var(--panel-2); color: var(--muted); }
 .s-downloading { background: var(--pink-soft); }
@@ -258,6 +264,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
   <div class="tabs" role="tablist">
     <button class="on" data-tab="profile" onclick="tab('profile')">From a profile</button>
     <button data-tab="collection" onclick="tab('collection')">From a collection</button>
+    <button data-tab="songs" onclick="tab('songs')">From a playlist</button>
     <button data-tab="list" onclick="tab('list')">From a list</button>
   </div>
 
@@ -328,6 +335,28 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
       <a href="https://osucollector.com" target="_blank" rel="noopener">osu!collector</a> — a farm list, a
       tournament pool, a friend's favourites. Paste the link and every map in it joins the queue;
       anything you already have is skipped as usual.
+    </div>
+  </div>
+
+  <div id="tab-songs" class="hidden">
+    <label class="f" for="songBox">Songs, one <b>Artist - Title</b> per line (or paste a playlist CSV)</label>
+    <textarea id="songBox" placeholder="Imagine Dragons - Believer&#10;Yorushika - Say It&#10;Camellia - GHOST"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="btn primary" id="matchBtn" onclick="findMatches()">Find beatmaps</button>
+      <label class="btn">Open .csv/.txt…<input type="file" accept=".txt,.csv,text/plain,text/csv" hidden onchange="loadSongFile(this)"></label>
+      <span class="hint" id="matchHint"></span>
+    </div>
+    <div class="help" style="margin-top:10px">
+      Export a Spotify playlist to CSV (<a href="https://exportify.net" target="_blank" rel="noopener">Exportify</a>
+      and similar tools do this) and paste it here, or just type song names. Each song is searched on osu! and
+      the most played matching beatmap is picked — <b>check the choices before queueing</b>, since remixes,
+      TV-size cuts and covers all look alike to a search.
+    </div>
+    <div id="matchList" class="list hidden" style="margin-top:14px"></div>
+    <div class="row hidden" id="matchActions" style="margin-top:12px">
+      <button class="btn primary" id="matchQueueBtn" onclick="act('match-queue')">Add to queue</button>
+      <button class="btn ghost" onclick="act('clear-matches')">Clear</button>
+      <span class="hint" id="matchSummary"></span>
     </div>
   </div>
 
@@ -528,6 +557,7 @@ function tab(name) {
   document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   $('tab-profile').classList.toggle('hidden', name !== 'profile');
   $('tab-collection').classList.toggle('hidden', name !== 'collection');
+  $('tab-songs').classList.toggle('hidden', name !== 'songs');
   $('tab-list').classList.toggle('hidden', name !== 'list');
 }
 
@@ -535,6 +565,71 @@ function tab(name) {
 function fetchMaps() {
   act('fetch', {user: $('userQuery').value, kind: $('kind').value, limit: +$('limit').value,
                 min_plays: $('kind').value === 'most_played' ? +$('minPlays').value : 0});
+}
+
+// --- playlist matching ------------------------------------------------------
+let matchRows = [], matchKey = '', lastMatchDone = -1;
+
+function findMatches() { act('match', {text: $('songBox').value}); }
+
+function loadSongFile(input) {
+  const f = input.files[0]; if (!f) return;
+  f.text().then(t => { $('songBox').value = t; findMatches(); });
+  input.value = '';
+}
+
+async function refreshMatches() {
+  try {
+    const r = await fetch('/api/matches', {headers: {'X-Osu-Dl': '1'}});
+    const d = await r.json();
+    matchRows = d.matches || [];
+  } catch { return; }
+  renderMatches();
+}
+
+function pickMatch(i, sel) {
+  const pick = +sel.value;
+  matchRows[i].pick = pick;
+  matchRows[i].include = pick >= 0;
+  act('match-pick', {i, pick, include: pick >= 0}).then(refreshMatches);
+}
+
+function toggleMatch(i, on) {
+  matchRows[i].include = on;
+  act('match-pick', {i, pick: on ? matchRows[i].pick : -1, include: on}).then(refreshMatches);
+}
+
+function renderMatches() {
+  const box = $('matchList'), actions = $('matchActions');
+  box.classList.toggle('hidden', !matchRows.length);
+  actions.classList.toggle('hidden', !matchRows.length);
+  if (!matchRows.length) { box.textContent = ''; matchKey = ''; return; }
+  const key = matchRows.map(m => `${m.pick}${m.include ? 1 : 0}`).join(',') + '|' + matchRows.length;
+  if (key === matchKey) return;
+  matchKey = key;
+  box.innerHTML = matchRows.map((m, i) => {
+    const chosen = m.pick >= 0 ? m.candidates[m.pick] : null;
+    const conf = chosen ? (chosen.text >= 0.85 ? 'ok' : chosen.text >= 0.65 ? 'warn' : 'low') : 'low';
+    const options = m.candidates.map((c, ci) =>
+      `<option value="${ci}"${ci === m.pick ? ' selected' : ''}>${esc(
+        `${c.artist} - ${c.title} · mapped by ${c.creator} · ${c.plays.toLocaleString()} plays · ${c.status}`)}</option>`).join('');
+    return `<div class="item match">
+      <input type="checkbox" ${m.include ? 'checked' : ''} ${m.candidates.length ? '' : 'disabled'}
+             onchange="toggleMatch(${i}, this.checked)" aria-label="Include this song">
+      <div class="meta">
+        <div class="t">${esc(m.artist ? m.artist + ' - ' + m.title : m.title)}</div>
+        ${m.candidates.length ? `<select class="pickbox" onchange="pickMatch(${i}, this)">
+             <option value="-1"${m.pick < 0 ? ' selected' : ''}>— skip this song —</option>${options}
+           </select>` : '<div class="a"><span class="missing">No beatmap found</span></div>'}
+      </div>
+      ${chosen ? `<a class="btn sm ghost" href="https://osu.ppy.sh/beatmapsets/${chosen.id}" target="_blank" rel="noopener">View</a>` : ''}
+      <span class="pill conf-${conf}">${chosen ? (conf === 'ok' ? 'good' : conf === 'warn' ? 'check' : 'unsure') : 'none'}</span>
+    </div>`;
+  }).join('');
+  const n = matchRows.filter(m => m.include && m.pick >= 0).length;
+  $('matchQueueBtn').textContent = `Add ${n} map${n === 1 ? '' : 's'} to queue`;
+  $('matchQueueBtn').disabled = !n;
+  $('matchSummary').textContent = `${n} of ${matchRows.length} songs confirmed`;
 }
 
 function loadCollection() {
@@ -725,6 +820,10 @@ function render() {
     : '';
   $('fetchBtn').disabled = !!S.busy || S.running;
   $('collectionBtn').disabled = !!S.busy || S.running;
+  $('matchBtn').disabled = !!S.busy || S.running;
+  $('matchHint').textContent = S.match_total && S.match_done < S.match_total
+    ? `Searching… ${S.match_done}/${S.match_total}` : '';
+  if (S.match_done !== lastMatchDone) { lastMatchDone = S.match_done; refreshMatches(); }
   const hasQueue = S.queue.length > 0;
   $('n2').classList.toggle('ok', hasQueue); $('n2').textContent = hasQueue ? '✓' : '2';
   $('step2').classList.toggle('locked', S.running);
