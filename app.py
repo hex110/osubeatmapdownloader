@@ -48,7 +48,7 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # Selenium Manager caches ChromeDriver here, and Chrome/ChromeDriver put their scratch files
 # in TEMP, so both stay inside the app folder instead of the user profile.
 os.environ["SE_CACHE_PATH"] = str(DATA / "selenium")
-for _key in ("TEMP", "TMP"):  # remembered so osu! can be launched with the real TEMP
+for _key in ("TEMP", "TMP", "TMPDIR"):  # remembered so osu! can be launched with the real TEMP
     os.environ.setdefault(f"OBD_ORIGINAL_{_key}", os.environ.get(_key, ""))
     os.environ[_key] = str(TEMP_DIR)
 PROFILE_DIR = DATA / "chrome-profile"  # the signed-in osu! session lives here
@@ -407,14 +407,38 @@ def act_open_folder(body):
     core.open_file(str(path))
 
 
+def _desktop_picker(initial, title):
+    """A folder picker from the desktop, since Linux python often ships without tkinter."""
+    for cmd in (["zenity", "--file-selection", "--directory", f"--title={title}",
+                 f"--filename={initial.rstrip('/')}/"],
+                ["kdialog", "--getexistingdirectory", initial, "--title", title],
+                ["qarma", "--file-selection", "--directory", f"--title={title}"]):
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        return out.stdout.strip()  # empty when cancelled
+    return None
+
+
 def act_browse(body):
     """Native folder picker, run as a child process so tkinter can't upset the server threads."""
     initial = body.get("initial") or str(Path.home())
+    title = body.get("title", "Choose a folder")
+    if os.name != "nt":
+        path = _desktop_picker(initial, title)
+        if path is not None:
+            return {"path": path}
     cmd = [sys.executable] + ([] if FROZEN else [str(Path(__file__).resolve())])
-    out = subprocess.run(cmd + ["--pick-folder", initial, body.get("title", "Choose a folder")],
+    out = subprocess.run(cmd + ["--pick-folder", initial, title],
                          capture_output=True, text=True, timeout=600,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     path = out.stdout.strip()
+    if not path and out.returncode != 0:
+        raise ValueError("No folder picker available. Install zenity or kdialog, "
+                         "or type the path into the box instead.")
     return {"path": os.path.normpath(path) if path else ""}
 
 
@@ -548,7 +572,7 @@ def main():
         return
 
     global JOB
-    JOB = core.close_chrome_with_app()
+    JOB = core.close_chrome_with_app(PROFILE_DIR)
     # we're the only copy running, so anything using our profile or temp is from an earlier session
     stopped = core.close_leftover_chrome(PROFILE_DIR)
     if stopped:
@@ -558,6 +582,14 @@ def main():
             shutil.rmtree(leftover) if leftover.is_dir() else leftover.unlink()
         except OSError:
             pass  # still locked by something; try again next launch
+
+    # osu!stable is the better default, but on Linux it only exists under Wine, so don't
+    # point a fresh install at a client that isn't there.
+    if "import_client" not in _load(CONFIG_FILE, {}).get("opts", {}) and os.name != "nt":
+        installed = S.clients()
+        if installed.get("lazer") and not installed.get("stable"):
+            S.opts["import_client"] = "lazer"
+            S.save_config()
 
     verify_sign_in()
     PORT = free_port(preferred)

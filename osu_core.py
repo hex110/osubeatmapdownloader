@@ -81,7 +81,10 @@ def fetch_user_maps(user, kind, limit, on_progress=None):
                 continue
             seen.add(sid)
             out.append({"id": sid, "title": s.get("title", ""), "artist": s.get("artist", ""),
-                        "cover": (s.get("covers") or {}).get("list", "")})
+                        "cover": (s.get("covers") or {}).get("list", ""),
+                        # most_played is ordered by play count and lists one entry per difficulty,
+                        # so this is the plays on the map's most played difficulty
+                        "plays": item.get("count", 0) if kind == "most_played" else 0})
             if len(out) >= limit:
                 break
         offset += len(page)
@@ -122,6 +125,11 @@ def make_driver(download_dir=None, headless=True, profile_dir=None):
     from selenium import webdriver  # imported lazily so the UI starts instantly
 
     opts = webdriver.ChromeOptions()
+    # On Linux the browser is often Chromium, or Chrome under a name Selenium doesn't look for,
+    # so point Selenium at the same binary the sign-in window uses.
+    chrome = find_chrome()
+    if chrome and os.name != "nt":
+        opts.binary_location = chrome
     if profile_dir:
         opts.add_argument(f"--user-data-dir={profile_dir}")
     if headless:
@@ -141,8 +149,14 @@ def make_driver(download_dir=None, headless=True, profile_dir=None):
             "download.directory_upgrade": True,
             "safebrowsing.enabled": True,
         })
-    # Selenium Manager fetches a chromedriver that matches the installed Chrome.
-    driver = webdriver.Chrome(options=opts)
+    # Selenium Manager fetches a chromedriver that matches the installed Chrome. For a distro
+    # Chromium it usually can't, but the distro ships a matching chromedriver alongside it.
+    service = None
+    local = _system_chromedriver(chrome)
+    if local:
+        from selenium.webdriver.chrome.service import Service
+        service = Service(executable_path=local)
+    driver = webdriver.Chrome(options=opts, service=service)
     if download_dir:
         driver.execute_cdp_cmd("Browser.setDownloadBehavior",
                                {"behavior": "allow", "downloadPath": str(download_dir)})
@@ -197,8 +211,20 @@ class SignInCancelled(Exception):
     pass
 
 
+# Chromium-based browsers Selenium can drive, best first. Chrome is preferred because
+# Selenium Manager can always fetch a matching driver for it.
+LINUX_BROWSERS = ("google-chrome", "google-chrome-stable", "google-chrome-beta",
+                  "chromium", "chromium-browser", "brave-browser", "brave",
+                  "vivaldi-stable", "vivaldi", "microsoft-edge", "microsoft-edge-stable")
+MAC_BROWSERS = ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser")
+
+
 def find_chrome():
-    """Path to chrome.exe (or the platform equivalent), or None."""
+    """Path to Chrome (or another Chromium-based browser Selenium can drive), or None."""
+    import shutil
+    import sys
     if os.name == "nt":
         import winreg
         for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
@@ -215,12 +241,57 @@ def find_chrome():
                 if path.is_file():
                     return str(path)
         return None
+    if sys.platform == "darwin":
+        for path in MAC_BROWSERS:
+            if Path(path).exists():
+                return path
+        return None
+    if os.environ.get("OBD_CHROME") and Path(os.environ["OBD_CHROME"]).is_file():
+        return os.environ["OBD_CHROME"]  # escape hatch for an install we don't know about
+    for name in LINUX_BROWSERS:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+NO_CHROME_MESSAGE = (
+    "No Chromium-based browser found. Install Google Chrome or Chromium "
+    "(Arch: sudo pacman -S chromium · Debian/Ubuntu: sudo apt install chromium · Fedora: sudo dnf install chromium), "
+    "or point the app at one with the OBD_CHROME environment variable. "
+    "A Flatpak or Snap browser can't be used, because the app needs to run it directly."
+) if os.name != "nt" else (
+    "Google Chrome isn't installed. Install it from google.com/chrome and try again."
+)
+
+
+def _major_version(exe):
+    """Major version of a browser or driver binary, e.g. 141, or None."""
+    import subprocess
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"(\d+)\.\d+\.\d+", out or "")
+    return int(m.group(1)) if m else None
+
+
+def _system_chromedriver(browser):
+    """A chromedriver already on this system that matches `browser`, or None.
+
+    Selenium Manager downloads drivers from Chrome for Testing, which has no builds for a
+    distro's Chromium. Distros package the matching chromedriver instead, so prefer that.
+    """
     import shutil
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
-        if shutil.which(name):
-            return shutil.which(name)
-    mac = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    return mac if Path(mac).exists() else None
+    if os.name == "nt" or not browser:
+        return None
+    candidates = [shutil.which("chromedriver"), "/usr/bin/chromedriver",
+                  "/usr/lib/chromium/chromedriver", "/usr/lib64/chromium/chromedriver"]
+    want = _major_version(browser)
+    for driver in candidates:
+        if driver and Path(driver).is_file() and want and _major_version(driver) == want:
+            return str(driver)
+    return None
 
 
 def _close_gracefully(proc):
@@ -263,7 +334,7 @@ def _sign_in(profile_dir, cancel, done):
     import subprocess
     chrome = find_chrome()
     if not chrome:
-        raise RuntimeError("Google Chrome isn't installed. Install it from google.com/chrome and try again.")
+        raise RuntimeError(NO_CHROME_MESSAGE)
     profile = Path(profile_dir)
     profile.mkdir(parents=True, exist_ok=True)
     proc = subprocess.Popen([
@@ -567,15 +638,16 @@ class Downloader:
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 
-def close_chrome_with_app():
-    """Put this process in a Windows job so every Chrome it starts dies with it.
+def close_chrome_with_app(profile_dir=None):
+    """Make every Chrome this app starts die with it.
 
-    Without this, closing the console window leaves headless Chrome running, and that
-    Chrome keeps the profile locked so the next launch can't start a browser.
-    Programs that should outlive the app (osu!) are started with CREATE_BREAKAWAY_FROM_JOB.
+    Without this, closing the terminal leaves headless Chrome running, and that Chrome keeps
+    the profile locked so the next launch can't start a browser. On Windows that's a job
+    object; on POSIX we sweep away the browsers started with our own Chrome profile.
+    Programs that should outlive the app (osu!) are unaffected by either.
     """
     if os.name != "nt":
-        return None
+        return _close_chrome_with_app_posix(profile_dir)
     import ctypes
     from ctypes import wintypes
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -605,10 +677,123 @@ def close_chrome_with_app():
     return job  # the caller must keep this handle alive for the life of the app
 
 
+BROWSER_EXE_NAMES = ("chrome", "chromium", "chromedriver", "brave", "msedge", "vivaldi")
+
+
+def _is_browser_exe(pid, argv0):
+    """Whether this process really is a browser binary, not something merely mentioning one."""
+    name = Path(os.readlink(f"/proc/{pid}/exe")).name if os.path.islink(f"/proc/{pid}/exe") else Path(argv0).name
+    return any(part in name.lower() for part in BROWSER_EXE_NAMES)
+
+
+def _chrome_pids_using(profile_dir):
+    """PIDs of Chrome/chromedriver processes running against our profile directory.
+
+    Matching is deliberately strict: the profile has to appear as an actual --user-data-dir
+    argument and the process has to be a browser binary. A loose substring match would also
+    catch this very app, whose own command line mentions both.
+    """
+    if not Path("/proc").is_dir():
+        return []  # Linux-only; macOS just leaves the browser alone, as it always has
+    wanted = str(profile_dir).rstrip("/")
+    # Chromium rewrites its argv into a single space-joined string, so /proc/<pid>/cmdline is
+    # not reliably NUL-separated. Flatten it and match the flag as text.
+    flag = re.compile(r"--user-data-dir=" + re.escape(wanted) + r"/?(?:\s|$)")
+    me = os.getpid()
+    pids = []
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit() or int(entry.name) == me:
+            continue
+        try:
+            cmdline = Path(entry.path, "cmdline").read_bytes().decode("utf-8", "replace").replace("\0", " ")
+        except OSError:
+            continue  # the process exited while we were looking
+        if not cmdline.strip() or not flag.search(cmdline):
+            continue
+        try:
+            if _is_browser_exe(entry.name, cmdline.split(" ", 1)[0]):
+                pids.append(int(entry.name))
+        except OSError:
+            continue
+    return pids
+
+
+def _kill_pids(pids, wait=10):
+    """SIGTERM, then SIGKILL whatever is left. Returns how many were signalled."""
+    import signal
+    alive = []
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            alive.append(pid)
+        except OSError:
+            pass  # already gone, or not ours to signal
+    signalled = len(alive)
+    deadline = time.time() + wait
+    while alive and time.time() < deadline:
+        alive = [pid for pid in alive if Path(f"/proc/{pid}").exists()]
+        if alive:
+            time.sleep(0.25)
+    for pid in alive:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    return signalled
+
+
+def _close_chrome_with_app_posix(profile_dir):
+    """Sweep our Chrome processes away when the app exits.
+
+    We can't use a process group here: leaving the terminal's foreground group would stop
+    Ctrl+C reaching us. Instead, find the browsers by the profile they were started with,
+    which also means we only ever touch Chrome windows that belong to this app.
+    """
+    import atexit
+    import signal
+    if not profile_dir:
+        return None
+
+    def sweep(signum=None, _frame=None):
+        _kill_pids(_chrome_pids_using(profile_dir), wait=5)
+        if signum is not None:
+            os._exit(0)
+
+    atexit.register(sweep)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, sweep)
+        except (OSError, ValueError):
+            pass  # not the main thread, or the signal doesn't exist here
+    return sweep
+
+
+def _close_leftover_chrome_posix(profile_dir):
+    """Kill a Chrome still holding our profile, and clear the lock it left behind.
+
+    Chrome guards a profile with a SingletonLock symlink; a stale one (the app was killed)
+    makes the next Chrome refuse to start.
+    """
+    killed = _kill_pids(_chrome_pids_using(profile_dir))
+    if killed:
+        time.sleep(1)
+    profile = Path(profile_dir)
+    for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        link = profile / name
+        try:
+            if link.is_symlink() or link.exists():
+                link.unlink()
+        except OSError:
+            pass
+    return killed
+
+
 def close_leftover_chrome(profile_dir):
     """Stop any Chrome still using our profile (e.g. from a copy of the app that crashed)."""
+    if os.name != "nt":
+        return _close_leftover_chrome_posix(profile_dir) if Path(profile_dir).is_dir() else 0
     lock = Path(profile_dir) / "lockfile"
-    if os.name != "nt" or not lock.exists():
+    if not lock.exists():
         return 0
     try:
         lock.unlink()  # succeeds only if no Chrome has the profile open
@@ -664,18 +849,32 @@ def _association_exe(prog_id):
     return (m.group(1) or m.group(2)) if m else None
 
 
+FLATPAK_PREFIX = "flatpak:"  # a launcher we run with `flatpak run <id>` instead of directly
+
+
 def _is_lazer(exe):
-    return (Path(exe).parent / "osu.Game.dll").exists()
+    """Whether this launcher is osu!lazer rather than osu!stable."""
+    path = Path(str(exe).removeprefix(FLATPAK_PREFIX))
+    if str(exe).startswith(FLATPAK_PREFIX):
+        return True
+    if path.suffix.lower() == ".exe":
+        # both clients ship an 'osu!.exe'; only lazer has the .NET game assembly beside it
+        return (path.parent / "osu.Game.dll").exists()
+    return True  # a native Linux/macOS launcher is always lazer; stable only runs under Wine
 
 
 def _exe_in(folder):
-    """osu!.exe inside a folder the user picked (lazer's install root keeps it under current/)."""
+    """osu! launchers inside a folder the user picked (lazer's install root keeps it under current/)."""
     if not folder:
         return []
     p = Path(folder)
-    if p.suffix.lower() == ".exe":
+    if p.suffix.lower() == ".exe" or (os.name != "nt" and p.is_file()):
         return [p]
-    return [p / "osu!.exe", p / "current" / "osu!.exe"]
+    out = [p / "osu!.exe", p / "current" / "osu!.exe"]
+    if os.name != "nt":
+        # a native lazer install: the AppImage, or the launcher script a distro package adds
+        out += [p / "osu.AppImage", p / "osu-lazer", p / "osu!", *sorted(p.glob("osu*.AppImage"))]
+    return out
 
 
 def osu_in_folder(client, folder):
@@ -686,12 +885,69 @@ def osu_in_folder(client, folder):
     return None
 
 
+def _flatpak_app(app_id):
+    """'flatpak:<id>' if that Flatpak is installed, else None."""
+    import shutil
+    import subprocess
+    if not shutil.which("flatpak"):
+        return None
+    try:
+        out = subprocess.run(["flatpak", "info", app_id], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return FLATPAK_PREFIX + app_id if out.returncode == 0 else None
+
+
+def _wine_prefix(exe):
+    """The WINEPREFIX an osu!stable install lives in, or None."""
+    for parent in Path(exe).parents:
+        if parent.name == "drive_c":
+            return parent.parent
+    return None
+
+
+def _find_osu_linux(client, songs_dir="", custom=""):
+    """osu! on Linux: lazer runs natively, stable only under Wine."""
+    import shutil
+    home = Path.home()
+    if client == "lazer":
+        candidates = [*_exe_in(custom), custom,
+                      shutil.which("osu-lazer"), shutil.which("osu!"), shutil.which("osu-lazer-bin"),
+                      "/opt/osu-lazer/osu.AppImage",
+                      *sorted(home.glob("Applications/osu*.AppImage")),
+                      *sorted(home.glob(".local/bin/osu*.AppImage")),
+                      *sorted(home.glob("Downloads/osu*.AppImage")),
+                      _flatpak_app("sh.ppy.osu")]
+    else:
+        candidates = [*_exe_in(custom),
+                      Path(songs_dir).parent / "osu!.exe" if songs_dir else None,
+                      # osu-winello / osu-wine, then the plain default prefix
+                      home / ".local/share/osu-wine/osu!/osu!.exe",
+                      home / ".local/share/wineprefixes/osu-wine/drive_c/osu!/osu!.exe",
+                      home / ".wine/drive_c/osu!/osu!.exe",
+                      home / "Games/osu!/osu!.exe",
+                      *sorted(home.glob(".wine*/drive_c/**/osu!.exe"))[:5]]
+    for exe in candidates:
+        if not exe:
+            continue
+        if str(exe).startswith(FLATPAK_PREFIX):
+            return str(exe)
+        path = Path(exe)
+        if path.is_file() and os.access(path, os.X_OK if path.suffix.lower() != ".exe" else os.F_OK) \
+                and _is_lazer(path) == (client == "lazer"):
+            return str(path)
+    return None
+
+
 def find_osu(client, songs_dir="", custom=""):
     """Path to the osu!stable or osu!lazer executable, or None if it isn't installed.
 
     Installs can live anywhere, so check (in order) the folder the user picked, the folder
     above their Songs folder, the program Windows opens .osz files with, and the default paths.
     """
+    import sys
+    if os.name != "nt" and sys.platform != "darwin":
+        return _find_osu_linux(client, songs_dir, custom)
     local = Path(os.environ.get("LOCALAPPDATA", Path.home()))
     if client == "stable":
         candidates = [*_exe_in(custom),
@@ -710,15 +966,51 @@ def find_osu(client, songs_dir="", custom=""):
     return None
 
 
+def _wine_path(path, prefix):
+    """A Windows-side path for an .osz, so osu!stable under Wine can open it."""
+    import subprocess
+    env = {**_child_env(), "WINEPREFIX": str(prefix), "WINEDEBUG": "-all"}
+    try:
+        out = subprocess.run(["winepath", "-w", str(path)], capture_output=True, text=True,
+                             timeout=60, env=env).stdout.strip()
+        if out:
+            return out
+    except (OSError, subprocess.SubprocessError):
+        pass
+    # Wine maps the whole filesystem to Z: by default, so this is a safe fallback
+    return "Z:" + str(path).replace("/", "\\")
+
+
+def _launch_osu(exe, path):
+    """Hand an .osz to an osu! launcher, whatever shape it takes on this platform."""
+    import shutil
+    import subprocess
+    env, cwd = _child_env(), None
+    if str(exe).startswith(FLATPAK_PREFIX):
+        cmd = ["flatpak", "run", str(exe).removeprefix(FLATPAK_PREFIX), str(path)]
+    elif os.name != "nt" and Path(exe).suffix.lower() == ".exe":
+        # osu!stable only runs under Wine, and it needs the prefix its install lives in
+        wine = shutil.which("wine")
+        if not wine:
+            raise RuntimeError("osu!stable needs Wine to run. Install wine, or import into osu!lazer instead.")
+        prefix = _wine_prefix(exe)
+        if prefix:
+            env = {**env, "WINEPREFIX": str(prefix)}
+        cmd, cwd = [wine, str(exe), _wine_path(path, prefix or Path.home() / ".wine")], str(Path(exe).parent)
+    else:
+        cmd, cwd = [str(exe), str(path)], str(Path(exe).parent)
+    extra = ({"creationflags": CREATE_BREAKAWAY_FROM_JOB} if os.name == "nt"
+             else {"start_new_session": True})  # osu! keeps running after the app closes
+    subprocess.Popen(cmd, env=env, cwd=cwd, **extra)
+
+
 def import_into_osu(path, client, songs_dir="", custom_paths=None):
     """Open an .osz with the chosen client (the other one if it's missing). Returns what was used."""
     other = "lazer" if client == "stable" else "stable"
     for c in (client, other):
         exe = find_osu(c, songs_dir, (custom_paths or {}).get(c, ""))
         if exe:
-            import subprocess
-            flags = CREATE_BREAKAWAY_FROM_JOB if os.name == "nt" else 0  # osu! keeps running after the app
-            subprocess.Popen([exe, str(path)], env=_child_env(), cwd=str(Path(exe).parent), creationflags=flags)
+            _launch_osu(exe, path)
             return c
     open_file(path)
     return "default"
@@ -732,4 +1024,5 @@ def open_file(path):
         # doesn't inherit our redirected TEMP the way os.startfile's children would
         subprocess.Popen(["explorer", str(Path(path))], creationflags=CREATE_BREAKAWAY_FROM_JOB)
     else:
-        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)],
+                         env=_child_env(), start_new_session=True)

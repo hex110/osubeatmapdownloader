@@ -146,6 +146,7 @@ kbd { background: var(--panel); border: 1px solid var(--line); border-bottom-wid
 .item .a { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .item .a a { color: var(--dim); text-decoration: none; }
 .item .a a:hover { color: var(--pink); }
+.item .a .plays { color: var(--pink); font-weight: 700; }
 .item .err { color: var(--red); font-size: 12px; }
 .pill { font-size: 12px; font-weight: 700; padding: 2px 9px; border-radius: 999px; white-space: nowrap; }
 .s-queued .pill { background: var(--panel-2); color: var(--muted); }
@@ -264,6 +265,9 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
             <span class="tip-body" role="tooltip">
               <b>Most played</b> includes every beatmap you've played at least once, not just your favourites.
               <br><br>
+              It is ordered by play count, so <b>How many</b> gives you exactly that many of your
+              <b>top most played</b> maps.
+              <br><br>
               Choose it to <b>recover a lost beatmap collection</b>: leave Player empty and set How many high
               enough to cover your whole library.
             </span>
@@ -279,7 +283,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
         </select>
       </div>
       <div style="width:110px">
-        <label class="f" for="limit">How many</label>
+        <label class="f" for="limit" title="For Most played, this is your top N by play count">How many</label>
         <input id="limit" type="number" min="1" max="20000" value="100">
       </div>
       <button class="btn primary" id="fetchBtn" onclick="fetchMaps()">Find maps</button>
@@ -496,7 +500,7 @@ function setFilter(f) { filter = f; listKey = ''; render(); }
 function rowContent(i) {
   return `<div class="meta">
       <div class="t">${esc(i.title || 'Beatmap set #' + i.id)}</div>
-      <div class="a">${i.artist ? esc(i.artist) + ' · ' : ''}<a href="https://osu.ppy.sh/beatmapsets/${i.id}" target="_blank" rel="noopener">#${i.id}</a>${i.note && i.status === 'have' ? ' · ' + esc(i.note) : ''}</div>
+      <div class="a">${i.plays ? `<b class="plays">${i.plays.toLocaleString()} plays</b> · ` : ''}${i.artist ? esc(i.artist) + ' · ' : ''}<a href="https://osu.ppy.sh/beatmapsets/${i.id}" target="_blank" rel="noopener">#${i.id}</a>${i.note && i.status === 'have' ? ' · ' + esc(i.note) : ''}</div>
       ${i.status === 'failed' && i.error ? `<div class="err">${esc(i.error)}</div>` : ''}
     </div>
     ${!S.running && ['queued', 'have', 'skipped'].includes(i.status)
@@ -527,7 +531,7 @@ function renderList(total) {
   }
   for (const i of rows) {
     const el = rowEls.get(i.id);
-    const sig = [i.status, i.title, i.artist, i.error, i.note, S.running].join('|');
+    const sig = [i.status, i.title, i.artist, i.plays, i.error, i.note, S.running].join('|');
     if (el.dataset.sig !== sig) {
       el.dataset.sig = sig;
       el.className = 'item s-' + i.status;

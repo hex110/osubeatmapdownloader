@@ -11,6 +11,7 @@ with a simple app that runs on your own PC.
 
 [![Download](https://img.shields.io/github/v/release/AustinKol/osubeatmapdownloader?label=download&style=for-the-badge&color=ff66aa)](https://github.com/AustinKol/osubeatmapdownloader/releases/latest)
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-2a2530?style=for-the-badge&logo=windows)
+![Linux](https://img.shields.io/badge/Linux-2a2530?style=for-the-badge&logo=linux&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2a2530?style=for-the-badge)](LICENSE)
 
 <picture>
@@ -41,6 +42,7 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 ## Features
 
 - **Grab whole lists at once.** A player's *most played*, *favourites*, *ranked*, *loved*, *guest* or *graveyard* maps. You can also paste IDs/links or open a `.txt` a friend sent you.
+- **Top N, not everything.** *Most played* is ordered by play count, so *How many* gives you exactly your top N maps, with the play count shown on every row.
 - **Runs invisibly.** Chrome works in the background (headless). No windows popping up, no need to close your browser first.
 - **Skips what you already have.** Maps in your osu!stable `Songs` folder, in the download folder, or downloaded in an earlier session.
 - **One-click import** into **osu!stable** or **osu!lazer**, or automatically as each map finishes.
@@ -89,6 +91,10 @@ The app doesn't control that window or read what you type.
 
 Type a player name (or leave it empty for yourself), pick a list and how many maps you want. Or switch to **From a list** and paste IDs or links.
 
+**Most played** is ordered by play count, highest first, so *How many* = **your top N most played maps**.
+Set it to 50 for a quick refresher, or to a few thousand to pull a whole library back. Each row shows how
+many times you played the map, so you can see where the list is cut off.
+
 > [!TIP]
 > **Recovering a lost library?** Choose **Most played**. It includes every beatmap you've played at least once, so
 > leave Player empty and set *How many* high enough to cover your whole collection.
@@ -130,6 +136,9 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 | **"You're signed out of osu!"** | Your saved sign-in expired (after about a month) or you signed out. Click **Sign in with osu!** again. |
 | **The sign-in window doesn't appear** | Check your taskbar for a new Chrome window. Google Chrome must be installed. |
 | **Chrome won't start** | Make sure Google Chrome is installed and up to date. The first run needs internet to fetch a matching ChromeDriver. |
+| **"No Chromium-based browser found"** (Linux) | Install Chrome or Chromium from your package manager. A Flatpak/Snap browser can't be used; set `OBD_CHROME=/path/to/browser` for anything unusual. |
+| **ChromeDriver version mismatch** (Linux) | Your distro's Chromium is newer or older than any driver online. Install your distro's `chromedriver` package: the app prefers it when its version matches. |
+| **Browse… does nothing** (Linux) | Install `zenity` or `kdialog`, or just type the path into the box. |
 | **Can't save settings** | The app's folder must be writable, so don't put it in *Program Files*. (It will fall back to `%LOCALAPPDATA%\osu! Beatmap Downloader`.) |
 | **Want to see what the browser is doing** | *Folders & options* → **Show the browser**. The *Activity log* at the bottom also shows every step. |
 
@@ -168,7 +177,8 @@ osu! Beatmap Downloader\
 └── downloads\    .osz files waiting to be imported
 ```
 
-Move the folder to move the app; delete it to uninstall.
+Move the folder to move the app; delete it to uninstall. (Running from source, `data/` and `downloads/`
+sit in the project folder the same way.)
 
 ## Run from source
 
@@ -179,8 +189,8 @@ git clone https://github.com/AustinKol/osubeatmapdownloader.git
 cd osubeatmapdownloader
 ```
 
-On Windows, double-click **`start.bat`**. It creates a virtual environment, installs dependencies and opens the app.
-Elsewhere:
+On Windows, double-click **`start.bat`**. On Linux and macOS, run **`./start.sh`**. Either one creates a
+virtual environment, installs dependencies and opens the app. By hand:
 
 ```bash
 python3 -m venv .venv
@@ -189,6 +199,37 @@ python3 -m venv .venv
 ```
 
 Options: `--port 1234` to use another port, `--no-browser` to not open a tab.
+
+### Linux notes
+
+You need a **Chromium-based browser the app can launch directly**:
+
+```bash
+sudo pacman -S chromium      # Arch
+sudo apt install chromium    # Debian/Ubuntu
+sudo dnf install chromium    # Fedora
+```
+
+Google Chrome, Chromium, Brave, Vivaldi and Edge are all found automatically. A **Flatpak or Snap
+browser will not work**, because the app has to start the browser itself and drive it with a matching
+ChromeDriver. If your browser lives somewhere unusual, point the app at it:
+
+```bash
+OBD_CHROME=/opt/my-browser/chrome ./start.sh
+```
+
+**Importing into osu!:**
+
+- **osu!lazer** is detected automatically, whether it came from your distro's package (`osu-lazer`), an
+  AppImage in `~/Applications`, `/opt/osu-lazer/`, or Flatpak (`sh.ppy.osu`).
+- **osu!stable** only runs under Wine, so the app looks for `osu!.exe` in the usual prefixes
+  (`~/.wine`, `osu-winello`'s prefix, `~/Games/osu!`) and launches it with `wine`. If it's elsewhere, use
+  **Locate…** and pick the folder containing `osu!.exe`. On a machine with no osu!stable, the app
+  defaults to lazer on first run.
+
+Folder pickers use **zenity** or **kdialog**; install either one if the *Browse…* buttons do nothing.
+(Most distros ship Python without `tkinter`, so the Windows picker isn't available.) You can always
+type a path into the box instead.
 
 ### Building a release
 
@@ -205,7 +246,7 @@ Double-click **`build.bat`**. It produces:
 | [`osu_core.py`](osu_core.py) | osu! profile lists, headless Chrome downloader, osu!stable/lazer detection |
 | [`web/index.html`](web/index.html) | The whole interface, in plain HTML, CSS and JavaScript |
 | [`build.bat`](build.bat) · [`tools/`](tools) · [`assets/`](assets) | Release packaging (PyInstaller) and the app icon |
-| [`start.bat`](start.bat) | Run-from-source launcher for Windows |
+| [`start.bat`](start.bat) · [`start.sh`](start.sh) | Run-from-source launchers for Windows, and for Linux/macOS |
 
 ## Contributing
 
