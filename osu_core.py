@@ -144,6 +144,42 @@ MIRRORS = (
 
 UNSAFE_IN_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Mirrors are not equally quick, and which one is quick changes through the day: one that
+# served 3 MB/s an hour ago can drop to 0.4 MB/s while another serves the same file from a
+# CDN cache ten times faster. Trying them in a fixed order only moves on when one *fails*,
+# so a mirror that is merely crawling would be used forever. Remember what each one has
+# actually delivered and put the quickest first instead.
+MIRROR_SPEEDS = {}                 # name -> (bytes per second, when measured)
+_SPEED_LOCK = threading.Lock()
+SPEED_STALE_AFTER = 600            # re-probe a mirror we haven't used for this long
+SPEED_MIN_SAMPLE = 512 * 1024      # a download too small to time reliably
+
+
+def record_mirror_speed(name, size, seconds, ok=True):
+    """Remember how a mirror performed. A failure scores zero, which sends it to the back."""
+    if ok and (seconds <= 0 or size < SPEED_MIN_SAMPLE):
+        return  # too small or too quick to be a fair measurement
+    rate = (size / seconds) if ok else 0.0
+    with _SPEED_LOCK:
+        previous = MIRROR_SPEEDS.get(name)
+        if previous and previous[0] and ok:
+            rate = previous[0] * 0.7 + rate * 0.3  # smooth out one odd download
+        MIRROR_SPEEDS[name] = (rate, time.time())
+
+
+def ordered_mirrors():
+    """MIRRORS, quickest known first. Untried or stale ones go first so they get a look."""
+    now = time.time()
+    with _SPEED_LOCK:
+        known = dict(MIRROR_SPEEDS)
+
+    def rank(mirror):
+        entry = known.get(mirror[0])
+        if entry is None or now - entry[1] > SPEED_STALE_AFTER:
+            return float("inf")  # unknown: worth finding out
+        return entry[0]
+    return sorted(MIRRORS, key=rank, reverse=True)
+
 
 def _osz_name(sid, disposition, item):
     """A safe '<id> Artist - Title.osz' name for a mirror download.
@@ -189,12 +225,12 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
     item = item or {}
     reason, absent = "No mirror had this beatmap.", 0
     stall = max(1, float(stall or DEFAULT_STALL))
-    for name, full_url, novideo_url in MIRRORS:
+    for name, full_url, novideo_url in ordered_mirrors():
         if stop is not None and stop.is_set():
             return None, "Cancelled."
         url = (novideo_url if no_video else full_url).format(sid=sid)
-        tmp = None
-        try:
+        tmp, began = None, time.time()  # from before the request: a mirror that takes four
+        try:                            # seconds to answer is slow, however fast it then sends
             req = urllib.request.Request(url, headers={"User-Agent": UA})
             # the socket timeout covers connecting and each individual read, so a mirror
             # that accepts the connection and then goes quiet trips it
@@ -202,6 +238,7 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
                 ctype = (r.headers.get("Content-Type") or "").lower()
                 if "html" in ctype or "json" in ctype:
                     reason, absent = f"{name}: doesn't have this beatmap.", absent + 1
+                    record_mirror_speed(name, 0, 0, ok=False)
                     continue
                 # read1() hands back whatever has arrived instead of blocking until the
                 # buffer is full, which is what lets the stall checks below run at all
@@ -237,16 +274,21 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
                 tmp.unlink(missing_ok=True)
                 continue
             tmp.replace(target)
+            record_mirror_speed(name, size, time.time() - began)
             return str(target), name
         except _Cancelled:
             return None, "Cancelled."
         except _Stalled:
             reason = f"{name}: stalled (barely any data for {stall:g}s)."
+            record_mirror_speed(name, 0, 0, ok=False)
         except (TimeoutError, socket.timeout):
             reason = f"{name}: no response for {stall:g}s."
+            record_mirror_speed(name, 0, 0, ok=False)
         except urllib.error.HTTPError as e:
             absent += e.code == 404
             reason = f"{name}: " + ("doesn't have this beatmap." if e.code == 404 else f"HTTP {e.code}.")
+            if e.code != 404:
+                record_mirror_speed(name, 0, 0, ok=False)
         except Exception as e:  # timeout, DNS, dropped connection: just try the next mirror
             reason = f"{name}: {type(e).__name__}."
         finally:
@@ -1008,9 +1050,11 @@ class Downloader:
                                              timeout=timeout, stop=self.stop_flag,
                                              stall=self.opts.get("stall", DEFAULT_STALL))
             if path:
-                if who != self.mirror_used:  # say which mirror once, not on every map
+                if who != self.mirror_used:  # say which mirror only when it changes
                     self.mirror_used = who
-                    self.log("info", f"Downloading from {who}.")
+                    rate = (MIRROR_SPEEDS.get(who) or (0, 0))[0]
+                    speed = f" ({rate / 1e6:.1f} MB/s)" if rate else ""
+                    self.log("info", f"Downloading from {who}{speed}.")
                 return path, ""
             if who == "Cancelled." or self.stop_flag.is_set():
                 return None, "Cancelled."

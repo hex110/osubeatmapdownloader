@@ -130,8 +130,13 @@ it; point it at an osu!stable `Songs` folder to skip those too.
 
 **Mirrors are the default and much faster.** They're community servers hosting the same `.osz`
 files, so no osu! account, no browser and no hourly limit are involved: about **1.5 seconds per
-map** instead of an hour per 200. The app tries catboy.best, osu.direct, beatconnect.io and
-nerinyan.moe in turn, so one being down doesn't stop a run.
+map** instead of an hour per 200. The app uses catboy.best, osu.direct, beatconnect.io and
+nerinyan.moe, so one being down doesn't stop a run.
+
+Which mirror is quickest changes through the day, and a mirror that is merely *slow* would
+otherwise be used forever, so the app times every download and puts the fastest one first.
+The difference is worth having: on one run here the default mirror had dropped to 0.4 MB/s
+while another was serving the same files at 7 MB/s.
 
 Choose **osu.ppy.sh** if you'd rather every map come from the official site through your own
 account. It's slower and capped, but it's exactly what clicking Download on the website does.
@@ -171,6 +176,7 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 |---|---|
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
 | **osu!lazer says "IPC took too long"** | A lazer that was already running stopped accepting imports. Close and reopen lazer; the maps stay in the download folder, so **Import all into osu!** picks them up. |
+| **Downloads got slow after a while** | A mirror has throttled or is busy. The app measures each one and switches to the quickest by itself, re-checking every 10 minutes; the *Activity log* names the mirror in use and its speed. |
 | **A map seems stuck** | It gives up on its own after 10 seconds without progress and moves to the next mirror. Change that with **Give up if stuck for** in *Folders & options*. Big maps are safe: the clock measures time *without data*, not total download time. |
 | **Maps in lazer aren't being skipped** | Press **Scan** next to *osu!lazer library*. If it says the folder wasn't found, set it manually — it's the folder holding `files` and `client.realm`. |
 | **A few old maps still aren't skipped** | Maps saved before osu! file format v10 carry no beatmap ID, so they're matched on artist/title/creator instead. That needs the metadata a profile list provides, so it can't work for a queue built by **pasting bare IDs**. |
