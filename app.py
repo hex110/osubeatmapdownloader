@@ -54,7 +54,8 @@ for _key in ("TEMP", "TMP", "TMPDIR"):  # remembered so osu! can be launched wit
 PROFILE_DIR = DATA / "chrome-profile"  # the signed-in osu! session lives here
 CONFIG_FILE = DATA / "config.json"
 HISTORY_FILE = DATA / "history.json"
-QUEUE_FILE = DATA / "queue.json"   # so a long run survives restarting the app
+QUEUE_FILE = DATA / "queue.json"     # so a long run survives restarting the app
+MATCHES_FILE = DATA / "matches.json"  # ...and so does a playlist you were half-way through
 INDEX = ROOT / "web" / "index.html"
 PREFERRED_PORT = 8765
 
@@ -98,9 +99,11 @@ class State:
         self.owned_lazer = set()      # already imported into osu!lazer
         self.owned_lazer_keys = set()  # ...and the pre-v10 maps that carry no ID
         self.queue = self._restore_queue()
-        self.matches = []          # song -> candidate beatmaps, awaiting confirmation
-        self.match_total = 0
+        self.matches = _load(MATCHES_FILE, [])  # song -> candidates, awaiting confirmation
+        self.matches = self.matches if isinstance(self.matches, list) else []
+        self.match_total = len(self.matches)
         self.queue_saved_at = 0
+        self.queue_source = _load(CONFIG_FILE, {}).get("queue_source", "")
         self.logs = []
         self.busy = ""
         self.busy_token = None
@@ -116,6 +119,7 @@ class State:
             "lazer_dir": self.lazer_dir, "osu_paths": self.osu_paths, "opts": self.opts,
             "spotify": self.spotify,
             "last_user_query": self.last_user_query, "mirror_speeds": core.speeds_snapshot(),
+            "queue_source": self.queue_source,
         })
 
     def save_history(self):
@@ -132,6 +136,12 @@ class State:
             if it.get("status") in ("downloading", None):
                 it["status"] = "queued"
         return items
+
+    def save_matches(self):
+        try:
+            _save(MATCHES_FILE, self.matches)
+        except OSError:
+            pass  # losing the resume file must never stop anything
 
     def save_queue(self, force=False):
         """Persist the queue, at most once every few seconds during a run."""
@@ -223,7 +233,7 @@ class State:
             return "have", "Downloaded in an earlier session"
         return "queued", ""
 
-    def set_queue(self, items, append=False):
+    def set_queue(self, items, append=False, source=""):
         """Replace the queue, or add to it without disturbing what's already there."""
         self.refresh_owned()
         for it in items:
@@ -235,6 +245,9 @@ class State:
                 self.queue = self.queue + [i for i in items if i["id"] not in have]
             else:
                 self.queue = items
+            if source:
+                self.queue_source = source if not append or not self.queue_source \
+                    else f"{self.queue_source} + {source}"
         self.save_queue(force=True)
 
     def snapshot(self, log_since):
@@ -257,6 +270,7 @@ class State:
                 "last_user_query": self.last_user_query, "history_count": len(self.history),
                 "clients": self.clients(),
                 "queue": self.queue, "counts": counts, "busy": self.busy,
+                "queue_source": self.queue_source,
                 "running": self.running(),
                 "job": self.job.status(counts.get("queued", 0) + counts.get("downloading", 0))
                        if self.running() else None,
@@ -419,7 +433,7 @@ def act_fetch(body):
         S.log("info", f"Fetching up to {limit} maps{cut} from {query}'s {kind.replace('_', ' ')} list…")
         items = core.fetch_user_maps(query, kind, limit, min_plays=min_plays, stop=cancel,
                                      on_progress=lambda n: setattr(S, "busy", f"Fetching… {n} maps"))
-        S.set_queue(items)
+        S.set_queue(items, source=f"{len(items)} maps from {query}'s {kind.replace('_', ' ')} list")
         have = sum(1 for i in items if i["status"] == "have")
         S.log("ok", f"Found {len(items)} beatmap sets" + (f", {have} of which you already have." if have else "."))
     in_background("Fetching…", run)
@@ -496,6 +510,7 @@ def _match_tracks(tracks, cancel):
 
 
 def _report_matches(total):
+    S.save_matches()  # both matching paths end here, including a cancelled one
     found = sum(1 for m in S.matches if m["pick"] >= 0)
     S.log("ok", f"Matched {found} of {len(S.matches)} songs"
                 + (f" (stopped early, {total} asked for)." if len(S.matches) < total else ".")
@@ -511,6 +526,7 @@ def act_match_pick(body):
         row = S.matches[i]
         row["pick"] = pick if 0 <= pick < len(row["candidates"]) else -1
         row["include"] = row["pick"] >= 0 and bool(body.get("include", True))
+    S.save_matches()
 
 
 def act_match_queue(_):
@@ -531,7 +547,7 @@ def act_match_queue(_):
     if not items:
         raise ValueError("Nothing confirmed yet: pick a beatmap for at least one song.")
     before = len(S.queue)
-    S.set_queue(items, append=True)     # the button says "add", so don't throw the rest away
+    S.set_queue(items, append=True, source=f"{len(items)} from a playlist")
     added = len(S.queue) - before
     S.log("ok", f"Added {added} beatmap set{'' if added == 1 else 's'} from your playlist"
                 + (f" ({len(items) - added} already in the queue)." if added < len(items) else "."))
@@ -556,12 +572,14 @@ def act_match_bulk(body):
                 row["pick"] = 0
             row["include"] = want and row["pick"] >= 0
             changed += 1
+    S.save_matches()
     return {"changed": changed}
 
 
 def act_clear_matches(_):
     with S.lock:
         S.matches, S.match_total = [], 0
+    S.save_matches()
 
 
 def act_collection(body):
@@ -578,7 +596,7 @@ def act_collection(body):
         S.log("info", "Reading the collection from osu!collector…")
         info, items = core.fetch_collection(link, limit=limit, stop=cancel,
                                             on_progress=lambda n: setattr(S, "busy", f"Reading… {n} sets"))
-        S.set_queue(items)
+        S.set_queue(items, source=f"{len(items)} maps from the osu!collector collection “{info['name']}”")
         have = sum(1 for i in items if i["status"] == "have")
         by = f" by {info['uploader']}" if info["uploader"] else ""
         S.log("ok", f"“{info['name']}”{by}: {len(items)} beatmap sets"
@@ -595,13 +613,18 @@ def act_paste(body):
     ids = core.parse_ids(body.get("text", ""))
     if not ids:
         raise ValueError("No beatmap IDs or links found in that text.")
-    S.set_queue([{"id": i, "title": "", "artist": "", "cover": ""} for i in ids])
+    S.set_queue([{"id": i, "title": "", "artist": "", "cover": ""} for i in ids],
+                source=f"{len(ids)} maps from a pasted list")
     S.log("ok", f"Loaded {len(ids)} beatmap sets from your list.")
 
 
 def act_settings(body):
     with S.lock:
         if "folder" in body and body["folder"].strip():
+            if S.running() and body["folder"].strip() != S.folder:
+                # the running job captured the old path, so a change now would only
+                # scatter the remaining maps across two folders
+                raise ValueError("Stop the download before changing where maps are saved.")
             S.folder = body["folder"].strip()
         if "songs_dir" in body:
             S.songs_dir = body["songs_dir"].strip()
@@ -914,6 +937,74 @@ PORT = PREFERRED_PORT
 JOB = None  # Windows job handle that closes our Chrome processes when the app exits
 
 
+USAGE = """osu! Beatmap Downloader
+
+  python app.py [options]
+
+Interface:
+  --port N              serve on another port (default 8765)
+  --no-browser          don't open a browser tab
+
+Fill the queue without touching the interface:
+  --profile NAME        a player's list (empty NAME means you)
+  --kind KIND           most_played (default), favourite, ranked, loved, graveyard, guest
+  --limit N             how many maps (default 100)
+  --min-plays N         for most_played, stop below this play count
+  --collection URL      an osu!collector collection
+  --list FILE           a text file of beatmap IDs or links
+  --start               begin downloading once the queue is filled
+  --exit-when-done      quit after the download finishes (implies --start, --no-browser)
+
+  python app.py --collection https://osucollector.com/collections/23333 --start
+  python app.py --profile Hex110 --limit 500 --min-plays 5 --exit-when-done
+"""
+
+
+def _arg(name, default=None):
+    """The value after --name on the command line, or default."""
+    return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
+
+
+def queue_from_args(cancel):
+    """Fill the queue from --profile / --collection / --list, for scripted runs."""
+    if "--collection" in sys.argv:
+        act_collection({"link": _arg("--collection"), "limit": _arg("--limit", 20000)})
+    elif "--list" in sys.argv:
+        act_paste({"text": Path(_arg("--list")).read_text("utf-8")})
+    elif "--profile" in sys.argv:
+        act_fetch({"user": _arg("--profile", ""), "kind": _arg("--kind", "most_played"),
+                   "limit": _arg("--limit", 100), "min_plays": _arg("--min-plays", 0)})
+    else:
+        return False
+    return True
+
+
+def run_from_args():
+    """Carry out a scripted run once the server is up: fill the queue, then download."""
+    def run():
+        try:
+            if not queue_from_args(None):
+                return
+            while S.busy:  # the fetch itself runs in the background
+                time.sleep(0.5)
+            if "--start" in sys.argv or "--exit-when-done" in sys.argv:
+                queued = sum(1 for i in S.queue if i["status"] == "queued")
+                if not queued:
+                    S.log("info", "Nothing to download.")
+                else:
+                    act_start({})
+            if "--exit-when-done" in sys.argv:
+                while S.running() or S.busy:
+                    time.sleep(1)
+                S.log("info", "Finished; exiting.")
+                os._exit(0)
+        except Exception as e:
+            S.log("error", core.friendly_error(e))
+            if "--exit-when-done" in sys.argv:
+                os._exit(1)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def main():
     global PORT
     for stream in (sys.stdout, sys.stderr):
@@ -922,8 +1013,10 @@ def main():
     if "--pick-folder" in sys.argv:
         i = sys.argv.index("--pick-folder")
         return pick_folder(*sys.argv[i + 1:i + 3])
+    if "--help" in sys.argv or "-h" in sys.argv:
+        return print(USAGE)
 
-    open_browser = "--no-browser" not in sys.argv
+    open_browser = "--no-browser" not in sys.argv and "--exit-when-done" not in sys.argv
     preferred = PREFERRED_PORT
     if "--port" in sys.argv:
         preferred = int(sys.argv[sys.argv.index("--port") + 1])
@@ -977,6 +1070,7 @@ def main():
           "  close it (or press Ctrl+C) to quit.\n", flush=True)
     if open_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    run_from_args()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

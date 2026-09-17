@@ -148,6 +148,19 @@ kbd { background: var(--panel); border: 1px solid var(--line); border-bottom-wid
 .item .a a:hover { color: var(--pink); }
 .item .a .plays { color: var(--pink); font-weight: 700; }
 .item .err { color: var(--red); font-size: 12px; }
+h3.group { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim);
+  margin: 22px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+h3.group:first-of-type { margin-top: 6px; }
+.card.slim h2 { margin-bottom: 0; }
+.card.slim.done { padding-top: 14px; padding-bottom: 14px; }
+.queue-src { color: var(--dim); font-size: 13px; margin: 0 0 10px; }
+#search { max-width: 260px; }
+.card.tucked { padding: 12px 16px; opacity: .78; }
+.card.tucked:hover, .card.tucked:focus-within { opacity: 1; }
+.card.tucked h2 { font-size: 15px; margin: 0; }
+.card.tucked #loginWhy { margin: 6px 0 8px; font-size: 13px; }
+.card.tucked details, .card.tucked .hint { display: none; }
+.card.tucked .btn.big { padding: 7px 14px; font-size: 14px; }
 .sep { display: flex; align-items: center; gap: 10px; color: var(--dim); font-size: 12px; margin: 14px 0 10px; }
 .sep::before, .sep::after { content: ""; height: 1px; background: var(--line); flex: 1; }
 .item.match { align-items: center; gap: 10px; }
@@ -218,8 +231,8 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
 </div>
 
 <!-- STEP 1 -->
-<section class="card" id="step1">
-  <h2><span class="n" id="n1">1</span> Sign in to osu! <span class="badge" id="optionalBadge" hidden>Optional</span></h2>
+<section class="card slim" id="step1">
+  <h2 id="loginHead"><span class="n" id="n1">○</span> Sign in to osu! <span class="badge" id="optionalBadge" hidden>Optional</span></h2>
   <div id="loginForm">
     <p class="sub" id="loginWhy">osu! only lets signed-in players download maps. Sign in once and the app remembers it on this computer.</p>
     <div class="row" style="align-items:center">
@@ -260,7 +273,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
 
 <!-- STEP 2 -->
 <section class="card" id="step2">
-  <h2><span class="n" id="n2">2</span> Choose beatmaps</h2>
+  <h2><span class="n" id="n2">1</span> Choose beatmaps</h2>
   <p class="sub">Grab maps from any player's profile, a shared osu!collector collection, or a list a friend sent you.</p>
 
   <div class="tabs" role="tablist">
@@ -391,6 +404,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
   <details>
     <summary>Folders & options</summary>
     <div style="margin-top:14px">
+      <h3 class="group">Downloading</h3>
       <div class="field">
         <span class="f" style="display:block">Download from
           <i class="tip" tabindex="0" aria-label="About download sources">i
@@ -413,6 +427,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
         <label class="check" id="fallbackBox" style="margin-top:10px"><input type="checkbox" data-opt="mirror_fallback">
           <span>Fall back to osu.ppy.sh<small>If no mirror has a map, fetch it from the website (needs sign-in)</small></span></label>
       </div>
+      <h3 class="group">Connections</h3>
       <div class="field">
         <label class="f" for="spotifyId">Spotify <span style="font-weight:400">(only for loading playlists by link)</span></label>
         <div class="row">
@@ -423,6 +438,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
         </div>
         <div class="hint" id="spotifyState" style="margin-top:6px"></div>
       </div>
+      <h3 class="group">Your osu! library</h3>
       <div class="field">
         <label class="f" for="lazerDir">osu!lazer library <span style="font-weight:400">(skips maps lazer already has)</span></label>
         <div class="row">
@@ -433,6 +449,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
         </div>
         <div class="hint" id="lazerInfo" style="margin-top:6px"></div>
       </div>
+      <h3 class="group">Files</h3>
       <div class="field">
         <label class="f" for="folder">Save downloads to</label>
         <div class="row">
@@ -470,6 +487,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
               <small class="where" id="whereLazer"></small></span></label>
         </div>
       </div>
+      <h3 class="group">While downloading</h3>
       <div class="grid2">
         <label class="check"><input type="checkbox" data-opt="no_video"><span>Skip videos<small>Smaller downloads</small></span></label>
         <label class="check"><input type="checkbox" data-opt="auto_open"><span>Import as they finish<small>Sends each map to osu! right away</small></span></label>
@@ -502,7 +520,7 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
 
 <!-- STEP 3 -->
 <section class="card" id="step3">
-  <h2><span class="n" id="n3">3</span> Download</h2>
+  <h2><span class="n" id="n3">2</span> Download</h2>
   <p class="sub">Chrome runs invisibly in the background. Feel free to minimise this tab.</p>
   <div class="notice">
     <b>Heads-up: osu! allows about 200 beatmap downloads per hour</b> (more with osu!supporter).
@@ -524,6 +542,12 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
 
   <div class="stats" id="stats" style="margin-top:10px"></div>
 
+  <p class="queue-src hidden" id="queueSrc"></p>
+  <div class="row" style="margin-bottom:-4px">
+    <input id="search" type="search" placeholder="Search the queue by artist, title or ID"
+           oninput="listKey=''; render()">
+    <div class="grow"></div>
+  </div>
   <div class="list" id="list"><div class="empty">Your queue is empty. Pick some beatmaps above.</div></div>
 
   <div class="done-banner" id="doneBanner">
@@ -743,14 +767,17 @@ function rowContent(i) {
 
 function renderList(total) {
   const box = $('list');
-  const rows = S.queue.filter(i => filter === 'all' || i.status === filter);
-  const key = `${filter}|${total}|` + rows.map(i => i.id).join(',');
+  const q = ($('search').value || '').trim().toLowerCase();
+  const rows = S.queue.filter(i => (filter === 'all' || i.status === filter)
+    && (!q || `${i.artist} ${i.title} ${i.id}`.toLowerCase().includes(q)));
+  const key = `${filter}|${q}|${total}|` + rows.map(i => i.id).join(',');
   if (key !== listKey) {
     listKey = key;
     rowEls = new Map();
     box.textContent = '';
     if (!rows.length) {
-      box.innerHTML = `<div class="empty">${total ? 'Nothing here.' : 'Your queue is empty. Pick some beatmaps above.'}</div>`;
+      box.innerHTML = `<div class="empty">${q ? `Nothing matches “${esc(q)}”.`
+        : total ? 'Nothing here.' : 'Your queue is empty. Pick some beatmaps above.'}</div>`;
       return;
     }
     const frag = document.createDocumentFragment();
@@ -790,6 +817,7 @@ function fmtTime(sec) {
 function render() {
   if (!S) return;
   const signedIn = !!S.user;
+  const mirror = (S.opts.source || 'mirror') === 'mirror';
 
   // step 1
   $('userChip').classList.toggle('hidden', !signedIn);
@@ -801,6 +829,9 @@ function render() {
     ? 'Opens osu! in a new tab of this browser.'
     : "Opens a Chrome window with osu!'s own sign-in page.";
   $('loginChromeBtn').classList.toggle('hidden', !S.can_read_browser);
+  // optional and unused: shrink it out of the way rather than leading the page with it
+  const loginIdle = mirror && !signedIn && !S.signing_in;
+  $('step1').classList.toggle('tucked', loginIdle);
   $('loginChromeWhy').textContent = S.can_read_browser ? 'if signing in here does not work' : '';
   $('waitingText').innerHTML = viaBrowser
     ? "<b>Sign in to osu! in the tab that just opened</b> (including the captcha and any email code). "
@@ -811,7 +842,7 @@ function render() {
     ? "Check your other browser tabs for osu!."
     : "Can't see it? Check your taskbar for a new Chrome window.";
   $('loginDone').classList.toggle('hidden', !signedIn || S.signing_in);
-  $('n1').classList.toggle('ok', signedIn); $('n1').textContent = signedIn ? '✓' : '1';
+  $('n1').classList.toggle('ok', signedIn); $('n1').textContent = signedIn ? '✓' : '○';
   $('loginBtn').disabled = !!S.busy || S.running;
 
   // step 2: only fill inputs the user isn't editing
@@ -832,7 +863,6 @@ function render() {
     : `<span class="missing">No osu!lazer library found.</span> Set it above if lazer is installed somewhere unusual.`;
 
   // download source
-  const mirror = (S.opts.source || 'mirror') === 'mirror';
   document.querySelectorAll('input[name=source]').forEach(el => el.checked = (el.value === 'mirror') === mirror);
   $('mirrorPacing').classList.toggle('hidden', !mirror);
   $('officialPacing').classList.toggle('hidden', mirror);
@@ -875,7 +905,10 @@ function render() {
     ? `Searching… ${S.match_done}/${S.match_total}` : '';
   if (S.match_done !== lastMatchDone) { lastMatchDone = S.match_done; refreshMatches(); }
   const hasQueue = S.queue.length > 0;
-  $('n2').classList.toggle('ok', hasQueue); $('n2').textContent = hasQueue ? '✓' : '2';
+  $('search').classList.toggle('hidden', S.queue.length < 15);
+  $('queueSrc').classList.toggle('hidden', !S.queue_source);
+  $('queueSrc').textContent = S.queue_source || '';
+  $('n2').classList.toggle('ok', hasQueue); $('n2').textContent = hasQueue ? '✓' : '1';
   $('step2').classList.toggle('locked', S.running);
 
   // step 3
@@ -966,10 +999,14 @@ async function poll() {
     const r = await fetch('/api/state?since=' + logSince);
     S = await r.json();
     appendLogs(S.logs);
-    render();
   } catch {
     $('now').innerHTML = '<span class="warn">Lost connection to the app. Is its window still open?</span>';
+    polling = false;
+    return;
   } finally { polling = false; }
+  // kept out of the fetch's catch: a bug in render() is not a lost connection, and
+  // swallowing it silently leaves half the page stale with no clue why
+  try { render(); } catch (e) { console.error('render failed', e); }
 }
 setInterval(poll, 800);
 poll();

@@ -211,6 +211,8 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 | Problem | Fix |
 |---|---|
 | **A long fetch or match is taking too long** | Press **Cancel** next to the spinner. Anything already found is kept. |
+| **Can't find a map in a long queue** | The search box above the list filters by artist, title or ID; it appears once the queue passes 15 maps. |
+| **Can't change the download folder** | Not while a download is running — the running job already has the old path. Stop it first. |
 | **A playlist song matched the wrong map** | Pick a different one from that row's dropdown, or untick the row. The list is sorted by how well the names matched and how played each map is. |
 | **A collection has maps nothing can download** | osu!collector collections can contain maps that were never submitted to osu!. The app says how many and skips them; they don't exist on any mirror. |
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
@@ -296,7 +298,17 @@ python3 -m venv .venv
 .venv/bin/python app.py
 ```
 
-Options: `--port 1234` to use another port, `--no-browser` to not open a tab.
+Options: `--port 1234` to use another port, `--no-browser` to not open a tab. `--help` lists the rest.
+
+It can also run without the interface, for a scheduled job or a script:
+
+```bash
+python app.py --collection https://osucollector.com/collections/23333 --start
+python app.py --profile Hex110 --limit 500 --min-plays 5 --exit-when-done
+python app.py --list maps.txt --exit-when-done
+```
+
+`--exit-when-done` quits once the queue finishes, so it works in cron.
 
 ### Linux notes
 
