@@ -89,6 +89,7 @@ class State:
         self.lazer_dir = cfg.get("lazer_dir", "")
         self.osu_paths = {"stable": "", "lazer": "", **cfg.get("osu_paths", {})}  # user-picked installs
         self.opts = {**DEFAULT_OPTS, **cfg.get("opts", {})}
+        core.restore_speeds(cfg.get("mirror_speeds"))  # don't relearn the mirrors every launch
         self.last_user_query = cfg.get("last_user_query", "")
         self.user = cfg.get("user") if PROFILE_DIR.is_dir() else None  # confirmed on startup
         self.history = set(_load(HISTORY_FILE, []))
@@ -109,7 +110,7 @@ class State:
         _save(CONFIG_FILE, {
             "user": self.user, "folder": self.folder, "songs_dir": self.songs_dir,
             "lazer_dir": self.lazer_dir, "osu_paths": self.osu_paths, "opts": self.opts,
-            "last_user_query": self.last_user_query,
+            "last_user_query": self.last_user_query, "mirror_speeds": core.speeds_snapshot(),
         })
 
     def save_history(self):
@@ -455,7 +456,7 @@ def act_start(_):
             # falling back to the website needs a signed-in browser
             "mirror_fallback": bool(S.opts.get("mirror_fallback")) and bool(S.user)}
     S.job = core.Downloader(S.queue, PROFILE_DIR, S.folder, opts, S.on_item, S.log,
-                            on_finish=lambda: S.save_queue(force=True))
+                            on_finish=lambda: (S.save_queue(force=True), S.save_config()))
     S.job.start()
 
 

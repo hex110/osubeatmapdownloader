@@ -138,6 +138,15 @@ otherwise be used forever, so the app times every download and puts the fastest 
 The difference is worth having: on one run here the default mirror had dropped to 0.4 MB/s
 while another was serving the same files at 7 MB/s.
 
+It sticks with the winner rather than re-testing constantly: one other mirror is re-checked
+every 40 downloads, a download crawling far behind a mirror known to be quicker is abandoned
+for it, and the measurements are saved so a restart doesn't start from scratch. Where a mirror
+publishes a request budget (catboy.best sends `X-RateLimit-*`), the app keeps within it.
+
+**Seconds between maps** is a minimum gap between *requests*, not an extra pause tacked onto
+each one, so a download that already took longer than the gap isn't followed by more waiting.
+Lower it only if you know the mirror is happy with it.
+
 Choose **osu.ppy.sh** if you'd rather every map come from the official site through your own
 account. It's slower and capped, but it's exactly what clicking Download on the website does.
 

@@ -150,9 +150,11 @@ UNSAFE_IN_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 # so a mirror that is merely crawling would be used forever. Remember what each one has
 # actually delivered and put the quickest first instead.
 MIRROR_SPEEDS = {}                 # name -> (bytes per second, when measured)
+MIRROR_PACE = {}                   # name -> seconds a mirror's own rate limit asks us to wait
 _SPEED_LOCK = threading.Lock()
-SPEED_STALE_AFTER = 600            # re-probe a mirror we haven't used for this long
 SPEED_MIN_SAMPLE = 512 * 1024      # a download too small to time reliably
+PROBE_EVERY = 40                   # re-check one other mirror this often, to notice changes
+_since_probe = 0
 
 
 def record_mirror_speed(name, size, seconds, ok=True):
@@ -168,17 +170,73 @@ def record_mirror_speed(name, size, seconds, ok=True):
 
 
 def ordered_mirrors():
-    """MIRRORS, quickest known first. Untried or stale ones go first so they get a look."""
-    now = time.time()
+    """MIRRORS, quickest known first, occasionally re-checking one of the others.
+
+    Mirrors are re-checked one at a time rather than all at once: sending every map to a
+    mirror that has gone slow is the whole problem, and a wholesale re-probe reintroduces it
+    every few minutes. Probing the single least recently measured mirror once every
+    PROBE_EVERY downloads notices a mirror getting better or worse at a tiny cost.
+    """
+    global _since_probe
     with _SPEED_LOCK:
         known = dict(MIRROR_SPEEDS)
+        _since_probe += 1
+        probing = _since_probe >= PROBE_EVERY and len(known) >= len(MIRRORS)
+        if probing:
+            _since_probe = 0
 
-    def rank(mirror):
-        entry = known.get(mirror[0])
-        if entry is None or now - entry[1] > SPEED_STALE_AFTER:
-            return float("inf")  # unknown: worth finding out
-        return entry[0]
-    return sorted(MIRRORS, key=rank, reverse=True)
+    ranked = sorted(MIRRORS, key=lambda m: known.get(m[0], (float("inf"), 0))[0], reverse=True)
+    if probing:
+        stalest = min(MIRRORS, key=lambda m: known.get(m[0], (0, 0))[1])
+        ranked.remove(stalest)
+        ranked.insert(0, stalest)
+    return ranked
+
+
+def note_rate_limit(name, headers):
+    """Respect a mirror that publishes a request budget, so we never outrun what it allows."""
+    try:
+        remaining = int(headers.get("X-RateLimit-Remaining"))
+        reset = headers.get("X-RateLimit-Reset")
+    except (TypeError, ValueError):
+        return
+    if not reset:
+        return
+    try:
+        from email.utils import parsedate_to_datetime
+        seconds_left = parsedate_to_datetime(reset).timestamp() - time.time()
+    except (TypeError, ValueError):
+        return
+    if seconds_left <= 0:
+        MIRROR_PACE.pop(name, None)
+        return
+    # spread whatever is left over the time left, with a little headroom
+    MIRROR_PACE[name] = 0.0 if remaining > 50 else seconds_left / max(1, remaining)
+
+
+def mirror_pace(name):
+    """The minimum gap this mirror's own rate limit asks for, in seconds."""
+    return MIRROR_PACE.get(name, 0.0)
+
+
+def speeds_snapshot():
+    """Learned mirror speeds, for saving between runs."""
+    with _SPEED_LOCK:
+        return {name: [rate, when] for name, (rate, when) in MIRROR_SPEEDS.items()}
+
+
+def restore_speeds(saved):
+    """Reload speeds measured in an earlier run, so a restart doesn't start from nothing."""
+    if not isinstance(saved, dict):
+        return
+    with _SPEED_LOCK:
+        for name, value in saved.items():
+            try:
+                rate, when = float(value[0]), float(value[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if any(name == m[0] for m in MIRRORS):
+                MIRROR_SPEEDS[name] = (rate, when)
 
 
 def _osz_name(sid, disposition, item):
@@ -215,6 +273,20 @@ class _Stalled(Exception):
     """A download that stopped making progress."""
 
 
+class _TooSlow(Exception):
+    """A download crawling far behind a mirror we know to be quicker."""
+
+
+SLOW_GRACE = 8          # give a download this long before judging it slow
+SLOW_FRACTION = 0.25    # ...then abandon it if it's under this share of the best mirror
+
+
+def _best_known_rate(exclude):
+    with _SPEED_LOCK:
+        rates = [r for name, (r, _) in MIRROR_SPEEDS.items() if name != exclude and r]
+    return max(rates, default=0.0)
+
+
 def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, stop=None,
                          stall=DEFAULT_STALL):
     """Fetch one beatmapset from the first mirror that has it.
@@ -229,12 +301,14 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
         if stop is not None and stop.is_set():
             return None, "Cancelled."
         url = (novideo_url if no_video else full_url).format(sid=sid)
+        best_elsewhere = _best_known_rate(exclude=name)
         tmp, began = None, time.time()  # from before the request: a mirror that takes four
         try:                            # seconds to answer is slow, however fast it then sends
             req = urllib.request.Request(url, headers={"User-Agent": UA})
             # the socket timeout covers connecting and each individual read, so a mirror
             # that accepts the connection and then goes quiet trips it
             with urllib.request.urlopen(req, timeout=stall) as r:
+                note_rate_limit(name, r.headers)
                 ctype = (r.headers.get("Content-Type") or "").lower()
                 if "html" in ctype or "json" in ctype:
                     reason, absent = f"{name}: doesn't have this beatmap.", absent + 1
@@ -268,6 +342,12 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
                             if window_bytes < TRICKLE_FLOOR * stall:
                                 raise _Stalled
                             window_start, window_bytes = time.time(), 0
+                        # a mirror can be perfectly alive and still be the wrong choice; if
+                        # one we know is much quicker exists, cut the loss and use that
+                        spent = time.time() - began
+                        if spent > SLOW_GRACE and best_elsewhere:
+                            if size / spent < best_elsewhere * SLOW_FRACTION:
+                                raise _TooSlow
                         chunk = r.read1(262144)
             if size < 1024:
                 reason = f"{name}: sent an empty file."
@@ -278,6 +358,10 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
             return str(target), name
         except _Cancelled:
             return None, "Cancelled."
+        except _TooSlow:
+            # not a failure, just a poor choice: keep the measurement honest and move on
+            record_mirror_speed(name, size, time.time() - began)
+            reason = f"{name}: much slower than another mirror."
         except _Stalled:
             reason = f"{name}: stalled (barely any data for {stall:g}s)."
             record_mirror_speed(name, 0, 0, ok=False)
@@ -964,7 +1048,7 @@ class Downloader:
                 return
 
             self._set(item, "downloading")
-            started = time.time()
+            started = cycle_start = time.time()
             ok, reason = self._download_one(item, timeout)
             since_rest += 1
             attempt = 0
@@ -1020,7 +1104,15 @@ class Downloader:
                     if not self._sleep(cooldown):
                         return
                     fails_in_row = 0
-            if not self._sleep(delay):
+            # `delay` is a minimum interval between requests, not an extra pause on the
+            # end of each one: a download that itself took longer than the delay has
+            # already been as gentle as the delay intends, so there's nothing left to wait.
+            wait = delay - (time.time() - cycle_start)
+            if mirror:
+                wait = max(wait, mirror_pace(self.mirror_used) - (time.time() - cycle_start))
+            if wait > 0 and not self._sleep(wait):
+                return
+            elif not self._sleep(0):  # still honour pause/stop when no wait is needed
                 return
 
     def _flush_imports(self):
