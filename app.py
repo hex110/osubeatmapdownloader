@@ -19,10 +19,16 @@ from urllib.parse import parse_qs, urlparse
 
 import osu_core as core
 
+if "--app-dir" in sys.argv:  # before the paths below are worked out
+    os.environ["OBD_APP_DIR"] = sys.argv[sys.argv.index("--app-dir") + 1]
+
 FROZEN = getattr(sys, "frozen", False)  # running as the PyInstaller build
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))  # bundled resources
 # Portable: everything the app creates lives next to the exe (or the project folder from source).
-APP_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+# OBD_APP_DIR moves everything the app writes somewhere else: handy for a second copy, and
+# it's what lets the tests run without touching the real data folder.
+APP_DIR = Path(os.environ["OBD_APP_DIR"]).expanduser() if os.environ.get("OBD_APP_DIR") \
+    else (Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent)
 
 
 def _writable(path):
@@ -957,6 +963,7 @@ USAGE = """osu! Beatmap Downloader
 
 Interface:
   --port N              serve on another port (default 8765)
+  --app-dir DIR         keep settings and downloads somewhere other than the app folder
   --no-browser          don't open a browser tab
 
 Fill the queue without touching the interface:

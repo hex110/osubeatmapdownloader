@@ -360,8 +360,12 @@ Double-click **`build.bat`**. It produces:
 | [`web/index.html`](web/index.html) | The whole interface, in plain HTML, CSS and JavaScript |
 | [`build.bat`](build.bat) · [`tools/`](tools) · [`assets/`](assets) | Release packaging (PyInstaller) and the app icon |
 | [`start.bat`](start.bat) · [`start.sh`](start.sh) | Run-from-source launchers for Windows, and for Linux/macOS |
+| [`tests/`](tests) | `python -m unittest discover -s tests` — standard library only, no network |
 
 ## Contributing
+
+Run the tests before sending a change: `python -m unittest discover -s tests`. They need no
+network and no osu! install, and they take about fifteen seconds. See [`tests/`](tests).
 
 Issues and pull requests are welcome. If osu! changes its website and downloads stop working, the download-button
 lookup lives in `CLICK_DOWNLOAD_JS` in [`osu_core.py`](osu_core.py).

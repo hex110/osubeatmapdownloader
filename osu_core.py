@@ -362,19 +362,21 @@ def scan_songs_folder(path):
     p = Path(path)
     if not p.is_dir():
         raise ValueError("That Songs folder doesn't exist.")
-    for entry in os.scandir(p):
-        m = re.match(r"(\d+)\s", entry.name)
-        if m:
-            ids.add(m.group(1))
+    with os.scandir(p) as entries:
+        for entry in entries:
+            m = re.match(r"(\d+)\s", entry.name)
+            if m:
+                ids.add(m.group(1))
     return ids
 
 
 def find_osz(folder, sid):
     """Finished .osz for this set in the folder, if any (osu names them '<id> Artist - Title.osz')."""
     try:
-        for entry in os.scandir(folder):
-            if entry.name.endswith(".osz") and re.match(rf"{sid}(\D|$)", entry.name):
-                return entry.path
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if entry.name.endswith(".osz") and re.match(rf"{sid}(\D|$)", entry.name):
+                    return entry.path
     except FileNotFoundError:
         pass
     return None
@@ -629,6 +631,8 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
         finally:
             if tmp:
                 tmp.unlink(missing_ok=True)
+    if stop is not None and stop.is_set():
+        return None, "Cancelled."   # the last mirror's timeout was us being called off
     if absent == len(MIRRORS):
         return None, "No mirror has this beatmap (it may be unranked, deleted or very new)."
     return None, reason
