@@ -75,6 +75,17 @@ class QueueBookkeeping(unittest.TestCase):
         self.assertEqual(self.S.queue[0]["status"], "have")
         self.assertIn("matched by name", self.S.queue[0]["note"])
 
+    def test_a_checksum_match_survives_a_mapper_rename(self):
+        # the .osu keeps the name the mapper had then; an API reports the name they have now
+        import hashlib
+        text = "osu file format v9\n\n[Metadata]\nTitle:T1\nArtist:A\nCreator:Echo49\n"
+        self.own(text)
+        item = self.items("1")[0]
+        item.update(creator="Echo", checksums=[hashlib.md5(text.encode()).hexdigest()])
+        self.S.set_queue([item])
+        self.assertEqual(self.S.queue[0]["status"], "have")
+        self.assertIn("checksum", self.S.queue[0]["note"])
+
     def test_a_pasted_list_has_no_names_so_cannot_match_by_name(self):
         self.own("osu file format v9\n\n[Metadata]\nTitle:T1\nArtist:A\nCreator:C\n")
         self.app.act_paste({"text": "1"})
@@ -176,3 +187,43 @@ class GuardsWhileDownloading(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImportVerification(unittest.TestCase):
+    """osu!lazer can accept a file over IPC and still not import it."""
+
+    def setUp(self):
+        self.app = fresh_app()
+        self.S = self.app.S
+        self.lazer = Path(tempfile.mkdtemp())
+        (self.lazer / "files" / "a").mkdir(parents=True)
+        self.S.lazer_dir = str(self.lazer)
+        self.S.opts["import_client"] = "lazer"
+
+    def put(self, name, text):
+        (self.lazer / "files" / "a" / name).write_text(text, encoding="utf-8")
+
+    def sent(self, sid, **kw):
+        return dict({"id": sid, "artist": "A", "title": f"T{sid}", "creator": "C",
+                     "file": f"/tmp/{sid}.osz"}, **kw)
+
+    def test_a_map_that_arrived_is_not_reported(self):
+        self.put("h1", "osu file format v14\n\n[Metadata]\nBeatmapSetID:55\n")
+        self.assertEqual(self.app.verify_imports([self.sent("55")]), [])
+
+    def test_a_map_that_never_arrived_is_reported(self):
+        missing = self.app.verify_imports([self.sent("55")])
+        self.assertEqual(missing, ["/tmp/55.osz"])
+
+    def test_an_old_map_counts_as_arrived_when_matched_by_name(self):
+        self.put("h1", "osu file format v9\n\n[Metadata]\nTitle:T55\nArtist:A\nCreator:C\n")
+        self.assertEqual(self.app.verify_imports([self.sent("55")]), [])
+
+    def test_a_map_with_no_names_is_not_guessed_at(self):
+        # nothing to match on, so stay quiet rather than cry wolf
+        item = self.sent("55", artist="", title="", creator="")
+        self.assertEqual(self.app.verify_imports([item]), [])
+
+    def test_nothing_is_checked_when_importing_into_stable(self):
+        self.S.opts["import_client"] = "stable"
+        self.assertEqual(self.app.verify_imports([self.sent("55")]), [])

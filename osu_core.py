@@ -68,7 +68,48 @@ def resolve_user_id(user):
     raise ValueError(f"Couldn't find an osu! user called “{name}”.")
 
 
-def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0, stop=None):
+GAME_MODES = ("osu", "taiko", "fruits", "mania")
+
+
+def difficulties(item, kind):
+    """The difficulties an entry covers: one for most_played, the whole set otherwise."""
+    if kind == "most_played":
+        beatmap = item.get("beatmap") or {}
+        return [beatmap] if beatmap else []
+    return item.get("beatmaps") or []
+
+
+def wanted(item, kind, mode="", stars=(0, 0), ranked_only=False):
+    """Whether an entry passes the mode / star / status filters.
+
+    A set is kept if *any* of its difficulties fits, since downloading a set brings them all.
+    """
+    maps = difficulties(item, kind)
+    low, high = stars
+    if ranked_only:
+        status = (item.get("beatmapset") or item).get("status", "")
+        if status not in ("ranked", "approved", "loved"):
+            return False
+    if not mode and not low and not high:
+        return True
+    if not maps:
+        return True  # nothing to judge it on: don't silently drop it
+    for beatmap in maps:
+        if mode and beatmap.get("mode") != mode:
+            continue
+        rating = beatmap.get("difficulty_rating")
+        if rating is None:
+            return True
+        if low and rating < low:
+            continue
+        if high and rating > high:
+            continue
+        return True
+    return False
+
+
+def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0, stop=None,
+                    mode="", stars=(0, 0), ranked_only=False):
     """Return [{id, title, artist, cover, plays}] from a user's profile list, deduplicated.
 
     `min_plays` only applies to the most_played list, which is ordered by play count, so
@@ -89,10 +130,17 @@ def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0, stop=None)
                 return out  # sorted by plays, so everything after this is below the cut too
             if sid in seen:
                 continue
+            if not wanted(item, kind, mode, stars, ranked_only):
+                seen.add(sid)  # judged once; don't weigh it again on another difficulty
+                continue
             seen.add(sid)
             out.append({"id": sid, "title": s.get("title", ""), "artist": s.get("artist", ""),
                         "cover": (s.get("covers") or {}).get("list", ""),
                         "creator": s.get("creator", ""),
+                        "mode": (difficulties(item, kind)[:1] or [{}])[0].get("mode", ""),
+                        "stars": round(max((b.get("difficulty_rating") or 0)
+                                           for b in difficulties(item, kind)) or 0, 2)
+                                 if difficulties(item, kind) else 0,
                         # most_played is ordered by play count and lists one entry per difficulty,
                         # so this is the plays on the map's most played difficulty
                         "plays": item.get("count", 0) if kind == "most_played" else 0})
@@ -638,6 +686,79 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
     return None, reason
 
 
+def beatmapset_info(sid):
+    """Artist, title and mapper for one set, from whichever mirror answers."""
+    for provider in ("https://catboy.best/api/s/", "https://osu.direct/api/v2/s/"):
+        try:
+            row = _get_json(f"{provider}{sid}")
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        artist = row.get("Artist") or row.get("artist") or ""
+        title = row.get("Title") or row.get("title") or ""
+        children = row.get("ChildrenBeatmaps") or row.get("beatmaps") or []
+        sums = [b.get("FileMD5") or b.get("checksum") for b in children]
+        if artist or title:
+            return {"artist": artist, "title": title,
+                    "creator": row.get("Creator") or row.get("creator") or "",
+                    "checksums": [c for c in sums if c]}
+    return None
+
+
+def fill_metadata(items, on_progress=None, stop=None, gap=0.2):
+    """Look up names for sets we only know the ID of, so duplicates can be spotted.
+
+    A pasted list of IDs carries no names, and a beatmap too old to hold a BeatmapSetID can
+    only be recognised by name, so without this those are downloaded again every time.
+    """
+    filled = 0
+    for i, item in enumerate(items):
+        _check(stop)
+        if item.get("title") or item.get("artist"):
+            continue
+        info = beatmapset_info(item["id"])
+        if info:
+            item.update(info)
+            filled += 1
+        if on_progress:
+            on_progress(i + 1, len(items))
+        time.sleep(gap)
+    return filled
+
+
+def estimate_size(ids, no_video=False, sample=5, stop=None):
+    """Roughly how much disk a queue will need, from the size of a few of its maps.
+
+    Mirrors send Content-Length, so a handful of requests is enough to get an average; asking
+    about every map in a thousand-map queue would be rude and slow.
+    """
+    import random
+    ids = list(ids)
+    if not ids:
+        return 0, 0
+    picks = random.sample(ids, min(sample, len(ids)))
+    sizes = []
+    for sid in picks:
+        _check(stop)
+        for name, full_url, novideo_url in ordered_mirrors():
+            url = (novideo_url if no_video else full_url).format(sid=sid)
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": UA, "Range": "bytes=0-1"})
+                with urllib.request.urlopen(req, timeout=20) as r:
+                    span = r.headers.get("Content-Range") or ""
+                    total = span.rpartition("/")[2] if "/" in span else r.headers.get("Content-Length")
+                    if total and total.isdigit() and int(total) > 1024:
+                        sizes.append(int(total))
+                        break
+            except Exception:
+                continue
+    if not sizes:
+        return 0, 0
+    average = sum(sizes) / len(sizes)
+    return int(average * len(ids)), len(sizes)
+
+
 # ---------------------------------------------------------------- osu!lazer's library
 
 def find_lazer_data(custom=""):
@@ -677,7 +798,7 @@ def name_key(artist, title, creator):
 
 
 def scan_lazer_library(data_dir):
-    """What's already in osu!lazer, as (beatmapset IDs, name keys for maps that have none).
+    """What's already in osu!lazer: (beatmapset IDs, name keys, beatmap checksums).
 
     lazer keeps every file under 'files/' named by its SHA-256, with the metadata in a Realm
     database that needs Realm itself to read. The .osu difficulty files are plain text
@@ -685,13 +806,17 @@ def scan_lazer_library(data_dir):
     because all but the header of most is skipped.
 
     Beatmaps saved before osu! file format v10 predate the BeatmapSetID field, so classics
-    like The Big Black and Can't Defeat Airman can't be matched by ID at all. They fall back
-    to artist/title/creator, which is why this returns two sets rather than one.
+    like The Big Black and Can't Defeat Airman can't be matched by ID at all. For those this
+    also records the file's MD5, which is the checksum osu! itself identifies a beatmap by and
+    which mirrors publish, and its artist/title/creator as a fallback. The checksum is the
+    reliable one: a mapper who renames leaves the old name in every file they ever made, so
+    the names in an old .osu and the names an API reports today can differ.
     """
+    import hashlib
     root = Path(data_dir) / "files"
     if not root.is_dir():
         raise ValueError("That isn't an osu!lazer data folder (it has no 'files' inside).")
-    ids, keys = set(), set()
+    ids, keys, sums = set(), set(), set()
     for dirpath, _, names in os.walk(root):
         for n in names:
             try:
@@ -699,17 +824,20 @@ def scan_lazer_library(data_dir):
                     if not f.read(15).startswith(b"osu file format"):
                         continue
                     f.seek(0)
-                    blob = f.read(16384)  # [Metadata] is always near the top
+                    blob = f.read()
             except OSError:
                 continue
-            m = re.search(rb"^BeatmapSetID\s*:\s*(\d+)", blob, re.M)
+            m = re.search(rb"^BeatmapSetID\s*:\s*(\d+)", blob[:16384], re.M)
             if m and m.group(1) != b"0":
                 ids.add(m.group(1).decode())
                 continue
-            key = name_key(_meta(blob, b"Artist"), _meta(blob, b"Title"), _meta(blob, b"Creator"))
+            # only maps without an ID need the expensive identifiers
+            sums.add(hashlib.md5(blob).hexdigest())
+            key = name_key(_meta(blob[:16384], b"Artist"), _meta(blob[:16384], b"Title"),
+                           _meta(blob[:16384], b"Creator"))
             if all(key):  # a blank field would match far too much
                 keys.add(key)
-    return ids, keys
+    return ids, keys, sums
 
 
 # ---------------------------------------------------------------- desktop notification
@@ -1137,6 +1265,7 @@ class Downloader:
         self.emit = emit            # emit(item) after any status change
         self.log = log              # log(level, message)
         self.on_finish = on_finish  # called once the queue is done, however it ended
+        self.verify_import = None   # optional: confirm a batch really landed in osu!
         self.stop_flag = threading.Event()
         self.pause_flag = threading.Event()
         self.warned_client = False
@@ -1389,6 +1518,11 @@ class Downloader:
         used, failed = import_batch(batch, wanted, self.opts.get("songs_dir", ""),
                                     self.opts.get("osu_paths"), log=self.log)
         self.failed_import += failed
+        if self.verify_import:
+            sent = set(batch) - set(failed)
+            # osu! can take a file and still not import it, so check rather than assume
+            self.failed_import += self.verify_import(
+                [i for i in self.items if i.get("file") in sent]) or []
         if used != wanted and not self.warned_client:
             self.warned_client = True
             other = f"osu!{used}" if used != "default" else "the default app"

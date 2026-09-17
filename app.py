@@ -104,6 +104,7 @@ class State:
         self.owned = set()          # in an osu!stable Songs folder
         self.owned_lazer = set()      # already imported into osu!lazer
         self.owned_lazer_keys = set()  # ...and the pre-v10 maps that carry no ID
+        self.owned_lazer_sums = set()  # ...identified by checksum, which survives a rename
         self.queue, self.queue_sources = self._restore_queue()
         self.matches = _load(MATCHES_FILE, [])  # song -> candidates, awaiting confirmation
         self.matches = self.matches if isinstance(self.matches, list) else []
@@ -223,7 +224,8 @@ class State:
         return self._lazer_found
 
     def refresh_owned(self):
-        self.owned, self.owned_lazer, self.owned_lazer_keys = set(), set(), set()
+        self.owned, self.owned_lazer = set(), set()
+        self.owned_lazer_keys, self.owned_lazer_sums = set(), set()
         if self.songs_dir:
             try:
                 self.owned = core.scan_songs_folder(self.songs_dir)
@@ -232,7 +234,8 @@ class State:
         data = self.lazer_data_dir()
         if data:
             try:
-                self.owned_lazer, self.owned_lazer_keys = core.scan_lazer_library(data)
+                (self.owned_lazer, self.owned_lazer_keys,
+                 self.owned_lazer_sums) = core.scan_lazer_library(data)
             except (ValueError, OSError) as e:
                 self.log("warn", f"Couldn't read your osu!lazer library: {e}")
 
@@ -242,6 +245,9 @@ class State:
             return "have", "Already in your osu! Songs folder"
         if sid in self.owned_lazer:
             return "have", "Already in osu!lazer"
+        if self.owned_lazer_sums and item.get("checksums"):
+            if self.owned_lazer_sums.intersection(item["checksums"]):
+                return "have", "Already in osu!lazer (an old map, matched by checksum)"
         if self.owned_lazer_keys:
             key = core.name_key(item.get("artist"), item.get("title"), item.get("creator"))
             if all(key) and key in self.owned_lazer_keys:
@@ -445,13 +451,24 @@ def act_fetch(body):
         raise ValueError("Unknown list type.")
     limit = max(1, min(int(body.get("limit") or 100), 20000))
     min_plays = max(0, min(int(body.get("min_plays") or 0), 1000000))
+    mode = body.get("mode") or ""
+    if mode and mode not in core.GAME_MODES:
+        raise ValueError("Unknown game mode.")
+    stars = (max(0.0, float(body.get("min_stars") or 0)), max(0.0, float(body.get("max_stars") or 0)))
+    if stars[1] and stars[0] > stars[1]:
+        raise ValueError("The star range is the wrong way round.")
+    ranked_only = bool(body.get("ranked_only"))
     S.last_user_query = body.get("user", "")
     S.save_config()
 
     def run(cancel):
         cut = f" played at least {min_plays} times" if min_plays else ""
+        cut += f", {mode}" if mode else ""
+        cut += f", {stars[0] or 0:g}-{stars[1]:g}★" if stars[1] else (f", {stars[0]:g}★+" if stars[0] else "")
+        cut += ", ranked only" if ranked_only else ""
         S.log("info", f"Fetching up to {limit} maps{cut} from {query}'s {kind.replace('_', ' ')} list…")
         items = core.fetch_user_maps(query, kind, limit, min_plays=min_plays, stop=cancel,
+                                     mode=mode, stars=stars, ranked_only=ranked_only,
                                      on_progress=lambda n: setattr(S, "busy", f"Fetching… {n} maps"))
         S.set_queue(items, source=f"{len(items)} maps from {query}'s {kind.replace('_', ' ')} list")
         have = sum(1 for i in items if i["status"] == "have")
@@ -638,6 +655,36 @@ def act_paste(body):
     S.log("ok", f"Loaded {len(ids)} beatmap sets from your list.")
 
 
+def act_identify(_):
+    """Look up names for queued sets we only know the ID of, then re-check what's owned."""
+    if S.running() or S.busy:
+        raise ValueError("Wait for the current task to finish first.")
+    unknown = [i for i in S.queue if not i.get("title") and not i.get("artist")]
+    if not unknown:
+        raise ValueError("Every map in the queue already has its name.")
+
+    def run(cancel):
+        S.log("info", f"Looking up {len(unknown)} beatmap names…")
+        filled = core.fill_metadata(
+            unknown, stop=cancel,
+            on_progress=lambda n, total: setattr(S, "busy", f"Looking up… {n}/{total}"))
+        S.set_queue(S.queue)  # names and checksums may reveal maps already owned
+        have = sum(1 for i in S.queue if i["status"] == "have")
+        S.log("ok", f"Named {filled} of {len(unknown)} maps; {have} of the queue is already yours.")
+    in_background("Looking up names…", run)
+
+
+def act_estimate(_):
+    """Roughly how much disk the queued maps will take, and whether there's room."""
+    ids = [i["id"] for i in S.queue if i["status"] == "queued"]
+    if not ids:
+        return {"bytes": 0, "maps": 0}
+    total, sampled = core.estimate_size(ids, no_video=bool(S.opts.get("no_video")))
+    free = shutil.disk_usage(Path(S.folder).parent if not Path(S.folder).exists()
+                             else S.folder).free
+    return {"bytes": total, "maps": len(ids), "sampled": sampled, "free": free}
+
+
 def act_settings(body):
     with S.lock:
         if "folder" in body and body["folder"].strip():
@@ -696,6 +743,7 @@ def act_start(_):
             "mirror_fallback": bool(S.opts.get("mirror_fallback")) and bool(S.user)}
     S.job = core.Downloader(S.queue, PROFILE_DIR, S.folder, opts, S.on_item, S.log,
                             on_finish=lambda: (S.save_queue(force=True), S.save_config()))
+    S.job.verify_import = verify_imports
     S.job.start()
 
 
@@ -753,6 +801,40 @@ def act_clear_history(_):
     if not S.running():
         S.set_queue(S.queue)
     S.log("info", "Forgot download history.")
+
+
+def verify_imports(sent):
+    """Say so when maps handed to osu!lazer don't actually turn up in it.
+
+    Worth checking: lazer can accept a file over IPC, acknowledge it, and still not import it,
+    which is how a run can report success and leave nothing behind. Anything in a batch was
+    missing from the library beforehand, so one look afterwards settles it.
+    """
+    data = S.lazer_data_dir()
+    if not sent or not data or S.opts.get("import_client") != "lazer":
+        return []
+    try:
+        ids, keys, sums = core.scan_lazer_library(data)
+    except (ValueError, OSError):
+        return []
+    missing = []
+    for item in sent:
+        key = core.name_key(item.get("artist"), item.get("title"), item.get("creator"))
+        if item["id"] in ids or (all(key) and key in keys):
+            continue
+        if sums.intersection(item.get("checksums") or ()):
+            continue
+        if not all(key):
+            continue  # too old to carry an ID and we have no names for it: can't tell
+        missing.append(item)
+    if missing:
+        example = missing[0].get("title") or missing[0]["id"]
+        S.log("warn", f"{len(missing)} of {len(sent)} maps didn't appear in osu!lazer "
+                      f"(e.g. {example}). They downloaded fine, so their .osz files are still "
+                      f"in the download folder for “Import all into osu!”.")
+    # the download itself succeeded, so the maps stay "done"; they're reported as not
+    # imported instead, which is what the end-of-run summary already covers
+    return [i.get("file") for i in missing if i.get("file")]
 
 
 def act_open_all(_):
@@ -842,8 +924,8 @@ def act_scan(body):
         data = S.lazer_data_dir()
         if not data:
             raise ValueError("Couldn't find your osu!lazer data folder. Set it in Folders & options.")
-        ids, keys = core.scan_lazer_library(data)
-        older = f" ({len(keys)} of them too old to carry an ID, matched by name)" if keys else ""
+        ids, keys, _ = core.scan_lazer_library(data)
+        older = f" ({len(keys)} of them too old to carry an ID)" if keys else ""
         S.log("ok", f"Your osu!lazer library has {len(ids) + len(keys)} beatmap sets{older}.")
         # only the ID-bearing ones can go into an exportable list
     else:
@@ -859,7 +941,7 @@ def act_scan(body):
 
 ACTIONS = {
     "login": act_login, "cancel-login": act_cancel_login, "finish-login": act_finish_login, "logout": act_logout, "fetch": act_fetch, "paste": act_paste,
-    "cancel-task": act_cancel_task, "collection": act_collection, "match": act_match,
+    "cancel-task": act_cancel_task, "identify": act_identify, "estimate": act_estimate, "collection": act_collection, "match": act_match,
     "spotify": act_spotify, "match-pick": act_match_pick,
     "match-queue": act_match_queue, "match-bulk": act_match_bulk, "clear-matches": act_clear_matches, "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
     "retry": act_retry, "toggle": act_toggle, "clear-queue": act_clear_queue,
@@ -971,6 +1053,9 @@ Fill the queue without touching the interface:
   --kind KIND           most_played (default), favourite, ranked, loved, graveyard, guest
   --limit N             how many maps (default 100)
   --min-plays N         for most_played, stop below this play count
+  --mode MODE           osu, taiko, fruits or mania
+  --stars LOW-HIGH      difficulty range, e.g. 4-6 or 5- for 5 and up
+  --ranked-only         skip unranked and graveyard maps
   --collection URL      an osu!collector collection
   --spotify URL         a Spotify playlist (needs credentials saved in the app first)
   --list FILE           a text file of beatmap IDs or links
@@ -999,8 +1084,11 @@ def queue_from_args(cancel):
     elif "--spotify" in sys.argv or "--songs" in sys.argv:
         return _queue_songs_from_args()
     elif "--profile" in sys.argv:
+        low, _, high = _arg("--stars", "").partition("-")
         act_fetch({"user": _arg("--profile", ""), "kind": _arg("--kind", "most_played"),
-                   "limit": _arg("--limit", 100), "min_plays": _arg("--min-plays", 0)})
+                   "limit": _arg("--limit", 100), "min_plays": _arg("--min-plays", 0),
+                   "mode": _arg("--mode", ""), "min_stars": low or 0, "max_stars": high or 0,
+                   "ranked_only": "--ranked-only" in sys.argv})
     else:
         return False
     return True

@@ -51,6 +51,8 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 - **Skips what you already have.** Maps in your **osu!lazer library**, your osu!stable `Songs` folder, the download folder, or downloaded in an earlier session. Even maps too old to carry a beatmap ID, which are matched by artist, title and mapper.
 - **Signs in through your own browser.** No separate Chrome window to hunt for, and nothing to do at all if you're already signed in to osu! there.
 - **Picks up where it left off.** The queue is saved, so closing the app mid-run doesn't lose your place.
+- **Checks its work.** osu!lazer can accept a beatmap and quietly not import it, so the app looks afterwards and tells you which ones didn't arrive.
+- **Tells you the size first.** *Estimate size* samples a few maps and says how much disk the queue needs, and how much you have.
 - **Never hangs on one map.** A download that stops making progress for 10 seconds is abandoned and the next mirror is tried, so one bad server can't stall a long queue.
 - **Tells you when it's done.** A desktop notification at the end of a long run.
 - **One-click import** into **osu!stable** or **osu!lazer**, or automatically as each map finishes. Imports go over in batches, and anything osu! refuses is reported and kept for a retry rather than quietly dropped.
@@ -140,6 +142,10 @@ many times you played the map, so you can see where the list is cut off.
 **Min. plays** cuts the list by play count instead of by a fixed number: set it to `5` to get every map
 you played at least five times, however many that turns out to be. `0` turns it off.
 
+**Game mode**, **difficulty** and **ranked only** narrow it further — useful when rebuilding a library,
+since there's no point pulling mania maps you'll never open. A set is kept if any of its difficulties
+fits, because downloading a set brings all of them.
+
 > [!TIP]
 > **Recovering a lost library?** Choose **Most played**. It includes every beatmap you've played at least once, so
 > leave Player empty and set *How many* high enough to cover your whole collection.
@@ -220,7 +226,7 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 | **Downloads got slow after a while** | A mirror has throttled or is busy. The app measures each one and switches to the quickest by itself, re-checking every 10 minutes; the *Activity log* names the mirror in use and its speed. |
 | **A map seems stuck** | It gives up on its own after 10 seconds without progress and moves to the next mirror. Change that with **Give up if stuck for** in *Folders & options*. Big maps are safe: the clock measures time *without data*, not total download time. |
 | **Maps in lazer aren't being skipped** | Press **Scan** next to *osu!lazer library*. If it says the folder wasn't found, set it manually — it's the folder holding `files` and `client.realm`. |
-| **A few old maps still aren't skipped** | Maps saved before osu! file format v10 carry no beatmap ID, so they're matched on artist/title/creator instead. That needs the metadata a profile list provides, so it can't work for a queue built by **pasting bare IDs**. |
+| **A few old maps still aren't skipped** | Maps saved before osu! file format v10 carry no beatmap ID. Press **Look up names** and the app fetches each one's details and matches it by checksum, which is exact and survives a mapper renaming themselves. |
 | **"Couldn't find an osu! sign-in in your browser"** | Sign in to osu! in your browser first, or use *Use a separate Chrome window instead*. Chromium-based browsers encrypt their cookies and always need that route. |
 | **"No download button"** for some maps | Turn on **Show explicit content** in your [osu! account settings](https://osu.ppy.sh/home/account/edit). Otherwise the map may have been removed. |
 | **"osu!'s hourly download limit reached"** | Expected after about 200 maps in an hour. The app retries the same map after 5, 10, 20 and 25 minutes and continues once osu! allows it, so just leave it running. Skipping to other maps doesn't help: the limit is per account, not per map. |

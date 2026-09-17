@@ -220,22 +220,24 @@ class LazerLibrary(unittest.TestCase):
 
     def test_modern_maps_are_found_by_id(self):
         root = self.library("osu file format v14\n\n[Metadata]\nTitle:X\nBeatmapSetID:12345\n")
-        ids, keys = core.scan_lazer_library(root)
+        ids, keys, sums = core.scan_lazer_library(root)
         self.assertEqual(ids, {"12345"})
         self.assertEqual(keys, set())
+        self.assertEqual(sums, set(), "a map with an ID needs no checksum")
 
     def test_maps_older_than_the_id_field_fall_back_to_names(self):
         # BeatmapSetID postdates file format v10: The Big Black and friends have none
         root = self.library("osu file format v9\n\n[Metadata]\nTitle:The Big Black\n"
                             "Artist:The Quick Brown Fox\nCreator:Blue Dragon\n")
-        ids, keys = core.scan_lazer_library(root)
+        ids, keys, sums = core.scan_lazer_library(root)
         self.assertEqual(ids, set())
         self.assertIn(core.name_key("The Quick Brown Fox", "The Big Black", "Blue Dragon"), keys)
+        self.assertEqual(len(sums), 1, "an ID-less map is also recorded by checksum")
 
     def test_unsubmitted_maps_are_not_counted_by_id(self):
         root = self.library("osu file format v14\n\n[Metadata]\nBeatmapSetID:-1\n"
                             "Title:Mine\nArtist:Me\nCreator:Me\n")
-        ids, _ = core.scan_lazer_library(root)
+        ids, _, _ = core.scan_lazer_library(root)
         self.assertEqual(ids, set())
 
     def test_a_folder_that_is_not_a_lazer_library(self):

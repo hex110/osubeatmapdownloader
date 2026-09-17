@@ -140,3 +140,47 @@ class Scoring(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FetchFilters(unittest.TestCase):
+    """A set is kept when any of its difficulties fits, since downloading brings them all."""
+
+    def entry(self, *diffs, status="ranked"):
+        maps = [{"mode": m, "difficulty_rating": r} for m, r in diffs]
+        return {"beatmaps": maps, "status": status}
+
+    def played(self, mode, stars, status="ranked"):
+        return {"beatmap": {"mode": mode, "difficulty_rating": stars, "status": status},
+                "beatmapset": {"status": status}}
+
+    def test_no_filters_keeps_everything(self):
+        self.assertTrue(core.wanted(self.entry(("mania", 9.0)), "favourite"))
+
+    def test_mode(self):
+        entry = self.entry(("osu", 4.0), ("mania", 3.0))
+        self.assertTrue(core.wanted(entry, "favourite", mode="mania"))
+        self.assertFalse(core.wanted(entry, "favourite", mode="taiko"))
+
+    def test_star_range(self):
+        entry = self.entry(("osu", 2.0), ("osu", 5.5))
+        self.assertTrue(core.wanted(entry, "favourite", stars=(5, 6)))
+        self.assertFalse(core.wanted(entry, "favourite", stars=(6, 8)))
+        self.assertTrue(core.wanted(entry, "favourite", stars=(0, 3)))
+
+    def test_mode_and_stars_must_hold_on_the_same_difficulty(self):
+        entry = self.entry(("osu", 2.0), ("mania", 7.0))
+        self.assertFalse(core.wanted(entry, "favourite", mode="osu", stars=(6, 8)))
+        self.assertTrue(core.wanted(entry, "favourite", mode="mania", stars=(6, 8)))
+
+    def test_ranked_only(self):
+        self.assertFalse(core.wanted(self.entry(("osu", 4.0), status="graveyard"),
+                                     "favourite", ranked_only=True))
+        self.assertTrue(core.wanted(self.entry(("osu", 4.0), status="loved"),
+                                    "favourite", ranked_only=True))
+
+    def test_most_played_is_judged_on_its_one_difficulty(self):
+        self.assertTrue(core.wanted(self.played("osu", 4.5), "most_played", stars=(4, 5)))
+        self.assertFalse(core.wanted(self.played("osu", 1.2), "most_played", stars=(4, 5)))
+
+    def test_an_entry_with_no_difficulty_data_is_kept(self):
+        self.assertTrue(core.wanted({"beatmaps": []}, "favourite", mode="osu", stars=(4, 5)))

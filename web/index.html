@@ -331,6 +331,26 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
       </div>
       <button class="btn primary" id="fetchBtn" onclick="fetchMaps()">Find maps</button>
     </div>
+    <div class="row" style="margin-top:10px; align-items:flex-end">
+      <div style="width:150px">
+        <label class="f" for="modeSel">Game mode</label>
+        <select id="modeSel">
+          <option value="">Any</option><option value="osu">osu!</option>
+          <option value="taiko">osu!taiko</option><option value="fruits">osu!catch</option>
+          <option value="mania">osu!mania</option>
+        </select>
+      </div>
+      <div style="width:190px">
+        <label class="f">Difficulty (stars)</label>
+        <div class="row" style="gap:6px">
+          <input id="minStars" type="number" min="0" max="15" step="0.5" placeholder="any">
+          <span class="hint" style="align-self:center">to</span>
+          <input id="maxStars" type="number" min="0" max="15" step="0.5" placeholder="any">
+        </div>
+      </div>
+      <label class="check" style="flex:0 0 auto"><input type="checkbox" id="rankedOnly">
+        <span>Ranked only<small>Skip graveyard and unranked</small></span></label>
+    </div>
   </div>
 
   <div id="tab-collection" class="hidden">
@@ -543,6 +563,11 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
   <div class="stats" id="stats" style="margin-top:10px"></div>
 
   <p class="queue-src hidden" id="queueSrc"></p>
+  <div class="row hidden" id="queueTools" style="margin-bottom:8px">
+    <button class="btn sm" id="estimateBtn" onclick="estimateSize()">Estimate size</button>
+    <button class="btn sm hidden" id="identifyBtn" onclick="act('identify')">Look up names</button>
+    <span class="hint" id="estimateOut"></span>
+  </div>
   <div class="row" style="margin-bottom:-4px">
     <input id="search" type="search" placeholder="Search the queue by artist, title or ID"
            oninput="listKey=''; render()">
@@ -618,7 +643,9 @@ function tab(name) {
 function fetchMaps() {
   if (!replaceOk()) return;
   act('fetch', {user: $('userQuery').value, kind: $('kind').value, limit: +$('limit').value,
-                min_plays: $('kind').value === 'most_played' ? +$('minPlays').value : 0});
+                min_plays: $('kind').value === 'most_played' ? +$('minPlays').value : 0,
+                mode: $('modeSel').value, min_stars: +$('minStars').value || 0,
+                max_stars: +$('maxStars').value || 0, ranked_only: $('rankedOnly').checked});
 }
 
 // --- playlist matching ------------------------------------------------------
@@ -697,6 +724,20 @@ function renderMatches() {
   $('matchSummary').textContent = `${n} of ${matchRows.length} songs confirmed`;
 }
 
+async function estimateSize() {
+  const out = $('estimateOut');
+  out.textContent = 'Checking a few maps…';
+  try {
+    const d = await api('estimate', {});
+    if (!d.maps) return out.textContent = 'Nothing queued to estimate.';
+    const gb = n => n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.round(n / 1e6) + ' MB';
+    const tight = d.bytes > d.free * 0.9;
+    out.innerHTML = `About <b>${gb(d.bytes)}</b> for ${d.maps} maps `
+      + `(from ${d.sampled} sampled) · ${gb(d.free)} free`
+      + (tight ? ' · <span class="missing">that may not fit</span>' : '');
+  } catch (e) { out.textContent = 'Could not estimate right now.'; }
+}
+
 function loadCollection() {
   if (replaceOk()) act('collection', {link: $('collectionLink').value, limit: +$('collectionLimit').value});
 }
@@ -757,7 +798,7 @@ function setFilter(f) { filter = f; listKey = ''; render(); }
 function rowContent(i) {
   return `<div class="meta">
       <div class="t">${esc(i.title || 'Beatmap set #' + i.id)}</div>
-      <div class="a">${i.plays ? `<b class="plays">${i.plays.toLocaleString()} plays</b> · ` : ''}${i.artist ? esc(i.artist) + ' · ' : ''}<a href="https://osu.ppy.sh/beatmapsets/${i.id}" target="_blank" rel="noopener">#${i.id}</a>${i.note && i.status === 'have' ? ' · ' + esc(i.note) : ''}</div>
+      <div class="a">${i.plays ? `<b class="plays">${i.plays.toLocaleString()} plays</b> · ` : ''}${i.stars ? `${i.stars}\u2605 · ` : ''}${i.artist ? esc(i.artist) + ' · ' : ''}<a href="https://osu.ppy.sh/beatmapsets/${i.id}" target="_blank" rel="noopener">#${i.id}</a>${i.note && i.status === 'have' ? ' · ' + esc(i.note) : ''}</div>
       ${i.status === 'failed' && i.error ? `<div class="err">${esc(i.error)}</div>` : ''}
     </div>
     ${!S.running && ['queued', 'have', 'skipped'].includes(i.status)
@@ -791,7 +832,7 @@ function renderList(total) {
   }
   for (const i of rows) {
     const el = rowEls.get(i.id);
-    const sig = [i.status, i.title, i.artist, i.plays, i.error, i.note, S.running].join('|');
+    const sig = [i.status, i.title, i.artist, i.plays, i.stars, i.error, i.note, S.running].join('|');
     if (el.dataset.sig !== sig) {
       el.dataset.sig = sig;
       el.className = 'item s-' + i.status;
@@ -906,6 +947,12 @@ function render() {
   if (S.match_done !== lastMatchDone) { lastMatchDone = S.match_done; refreshMatches(); }
   const hasQueue = S.queue.length > 0;
   $('search').classList.toggle('hidden', S.queue.length < 15);
+  $('queueTools').classList.toggle('hidden', !hasQueue || S.running);
+  const nameless = S.queue.filter(i => !i.title && !i.artist).length;
+  $('identifyBtn').classList.toggle('hidden', !nameless);
+  $('identifyBtn').textContent = `Look up ${nameless} name${nameless === 1 ? '' : 's'}`;
+  $('identifyBtn').disabled = !!S.busy;
+  $('estimateBtn').disabled = !!S.busy;
   $('queueSrc').classList.toggle('hidden', !S.queue_source);
   $('queueSrc').textContent = S.queue_source || '';
   $('n2').classList.toggle('ok', hasQueue); $('n2').textContent = hasQueue ? '✓' : '1';
