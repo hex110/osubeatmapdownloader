@@ -114,13 +114,20 @@ and paste songs, or to **From a list** and paste IDs or links.
 
 <br>
 
-Export a playlist to CSV with a tool like [Exportify](https://exportify.net) and paste it in, or just type
-`Artist - Title` lines. Every song is searched on osu! and the most played matching beatmap is picked.
+Paste a **Spotify playlist link** and the app reads it directly. That needs a free Spotify app of your
+own — make one at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and put its
+*Client ID* and *Client secret* in **Folders & options → Spotify**. Spotify requires this even for public
+playlists, and it won't share its own editorial playlists with an app at all.
+
+Or skip that entirely: export a playlist to CSV with a tool like [Exportify](https://exportify.net) and
+paste it in, or just type `Artist - Title` lines. Every song is searched on osu! and the most played
+matching beatmap is picked.
 
 **Check the picks before queueing.** A search can't tell a song from its remix, its TV-size cut or a cover,
 so each row has a dropdown with the other candidates (mapper, play count and ranked status shown) and a
 tick box to leave a song out. Songs with no convincing match are left unticked for you. The badge on each
-row says how well the names actually agreed: *good*, *check* or *unsure*.
+row says how well the names actually agreed: *good*, *check* or *unsure*, and **Tick good only** / **Tick
+all** / **Untick all** handle a long playlist in one go.
 
 Nothing is downloaded until you press **Add to queue**, and everything you already own is skipped as usual.
 
@@ -203,6 +210,7 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 
 | Problem | Fix |
 |---|---|
+| **A long fetch or match is taking too long** | Press **Cancel** next to the spinner. Anything already found is kept. |
 | **A playlist song matched the wrong map** | Pick a different one from that row's dropdown, or untick the row. The list is sorted by how well the names matched and how played each map is. |
 | **A collection has maps nothing can download** | osu!collector collections can contain maps that were never submitted to osu!. The app says how many and skips them; they don't exist on any mirror. |
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |

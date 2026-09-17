@@ -68,7 +68,7 @@ def resolve_user_id(user):
     raise ValueError(f"Couldn't find an osu! user called “{name}”.")
 
 
-def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0):
+def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0, stop=None):
     """Return [{id, title, artist, cover, plays}] from a user's profile list, deduplicated.
 
     `min_plays` only applies to the most_played list, which is ordered by play count, so
@@ -78,6 +78,7 @@ def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0):
     min_plays = min_plays if kind == "most_played" else 0
     out, seen, offset = [], set(), 0
     while len(out) < limit:
+        _check(stop)
         page = _get_json(f"{OSU}/users/{uid}/beatmapsets/{kind}?offset={offset}&limit=100")
         if not page:
             break
@@ -124,7 +125,7 @@ def parse_collection_id(text):
     return m.group(1)
 
 
-def fetch_collection(text, limit=20000, on_progress=None):
+def fetch_collection(text, limit=20000, on_progress=None, stop=None):
     """Return (collection info, [{id, title, artist, creator}]) for an osu!collector collection."""
     cid = parse_collection_id(text)
     try:
@@ -135,6 +136,7 @@ def fetch_collection(text, limit=20000, on_progress=None):
         raise
     out, seen, cursor = [], set(), None
     while len(out) < limit:
+        _check(stop)
         url = f"{OSU_COLLECTOR}/api/collections/{cid}/beatmapsv2?perPage={COLLECTOR_PAGE}"
         page = _get_json(url + (f"&cursor={cursor}" if cursor else ""))
         rows = page.get("beatmaps") or []
@@ -221,6 +223,78 @@ def parse_tracks(text):
             out.append((parts[0].strip(), parts[1].strip()))
         elif line:
             out.append(("", line))  # no separator: treat the whole line as a title
+    return out
+
+
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_API = "https://api.spotify.com/v1"
+
+
+def parse_spotify_link(text):
+    """(kind, id) from a Spotify playlist or album link, URI, or bare ID."""
+    text = (text or "").strip()
+    m = re.search(r"(playlist|album)[/:]([A-Za-z0-9]{22})", text)
+    if m:
+        return m.group(1), m.group(2)
+    if re.fullmatch(r"[A-Za-z0-9]{22}", text):
+        return "playlist", text
+    raise ValueError("Paste a Spotify playlist link, e.g. "
+                     "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
+
+
+def spotify_token(client_id, client_secret):
+    """An app access token. Spotify needs one even to read a public playlist."""
+    import base64
+    if not client_id or not client_secret:
+        raise ValueError("Add your Spotify client ID and secret in Folders & options first.")
+    auth = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    req = urllib.request.Request(
+        SPOTIFY_TOKEN_URL, data=b"grant_type=client_credentials",
+        headers={"Authorization": f"Basic {auth}", "User-Agent": UA,
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode("utf-8"))["access_token"]
+    except urllib.error.HTTPError as e:
+        if e.code in (400, 401):
+            raise ValueError("Spotify rejected those credentials. Check the client ID and "
+                             "secret from your app at developer.spotify.com/dashboard.") from None
+        raise
+
+
+def fetch_spotify_tracks(link, client_id, client_secret, limit=500, on_progress=None, stop=None):
+    """[(artist, title)] from a public Spotify playlist or album."""
+    kind, sid = parse_spotify_link(link)
+    token = spotify_token(client_id, client_secret)
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": UA, "Accept": "application/json"}
+    url = f"{SPOTIFY_API}/{kind}s/{sid}/tracks?limit=50"
+    out = []
+    while url and len(out) < limit:
+        _check(stop)
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                page = json.loads(r.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise ValueError("Spotify has no such playlist, or it isn't public.") from None
+            if e.code == 403:
+                raise ValueError("Spotify won't share that playlist with an app. Editorial "
+                                 "playlists made by Spotify itself are blocked; a playlist you "
+                                 "or another user made works.") from None
+            raise
+        for item in page.get("items") or []:
+            track = item.get("track") if kind == "playlist" else item
+            if not track or track.get("is_local"):
+                continue
+            artists = ", ".join(a.get("name", "") for a in (track.get("artists") or []))
+            if track.get("name"):
+                out.append((artists.split(",")[0].strip(), track["name"]))
+            if len(out) >= limit:
+                break
+        if on_progress:
+            on_progress(len(out))
+        url = page.get("next")
     return out
 
 
@@ -745,6 +819,15 @@ LOGIN_URL = f"{OSU}/home/account/edit"  # logged-out visitors get the sign-in fo
 
 class SignInCancelled(Exception):
     pass
+
+
+class Cancelled(Exception):
+    """The user called off a background job."""
+
+
+def _check(stop):
+    if stop is not None and stop.is_set():
+        raise Cancelled
 
 
 class _Cancelled(Exception):

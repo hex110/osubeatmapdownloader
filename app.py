@@ -87,6 +87,7 @@ class State:
         self.folder = cfg.get("folder") or str(DEFAULT_DOWNLOADS)
         self.songs_dir = cfg.get("songs_dir", "")
         self.lazer_dir = cfg.get("lazer_dir", "")
+        self.spotify = {"id": "", "secret": "", **cfg.get("spotify", {})}
         self.osu_paths = {"stable": "", "lazer": "", **cfg.get("osu_paths", {})}  # user-picked installs
         self.opts = {**DEFAULT_OPTS, **cfg.get("opts", {})}
         core.restore_speeds(cfg.get("mirror_speeds"))  # don't relearn the mirrors every launch
@@ -104,6 +105,7 @@ class State:
         self.busy = ""
         self.busy_token = None
         self.job = None
+        self.busy_cancel = None  # set to stop the running background job
         self.signing_in = None  # (cancel, done) events while the sign-in window is open
         self.browser_login = False  # waiting for the user to sign in in their own browser
 
@@ -112,6 +114,7 @@ class State:
         _save(CONFIG_FILE, {
             "user": self.user, "folder": self.folder, "songs_dir": self.songs_dir,
             "lazer_dir": self.lazer_dir, "osu_paths": self.osu_paths, "opts": self.opts,
+            "spotify": self.spotify,
             "last_user_query": self.last_user_query, "mirror_speeds": core.speeds_snapshot(),
         })
 
@@ -220,13 +223,18 @@ class State:
             return "have", "Downloaded in an earlier session"
         return "queued", ""
 
-    def set_queue(self, items):
+    def set_queue(self, items, append=False):
+        """Replace the queue, or add to it without disturbing what's already there."""
         self.refresh_owned()
         for it in items:
             it["status"], it["note"] = self.classify(it)
             it.setdefault("error", "")
         with self.lock:
-            self.queue = items
+            if append:
+                have = {i["id"] for i in self.queue}
+                self.queue = self.queue + [i for i in items if i["id"] not in have]
+            else:
+                self.queue = items
         self.save_queue(force=True)
 
     def snapshot(self, log_since):
@@ -237,10 +245,12 @@ class State:
                 counts[it["status"]] = counts.get(it["status"], 0) + 1
             return {
                 "user": self.user, "signing_in": bool(self.signing_in) or self.browser_login,
+                "can_cancel": bool(self.busy_cancel),
                 "login_mode": "browser" if self.browser_login else "chrome",
                 "can_read_browser": self.can_read_browser(),
                 "folder": self.folder, "songs_dir": self.songs_dir, "opts": self.opts,
                 "match_done": len(self.matches), "match_total": self.match_total,
+                "spotify_id": self.spotify["id"], "spotify_ready": bool(self.spotify["secret"]),
                 "lazer_dir": self.lazer_dir, "lazer_found": self.lazer_data_dir(),
                 "lazer_count": len(self.owned_lazer) + len(self.owned_lazer_keys),
                 "lazer_by_name": len(self.owned_lazer_keys),
@@ -261,18 +271,33 @@ S = State()
 # ---------------------------------------------------------------- actions
 
 def in_background(label, fn):
-    token = object()
-    S.busy, S.busy_token = label, token  # set before the thread starts so a second click can't slip in
+    """Run a slow job off the request thread, with a way to call it off.
 
-    def run():
+    `fn` is handed a threading.Event that it should check wherever it loops: fetching a
+    thousand maps or matching a playlist takes minutes, and there has to be a way out.
+    """
+    token, cancel = object(), threading.Event()
+    # set before the thread starts so a second click can't slip in
+    S.busy, S.busy_token, S.busy_cancel = label, token, cancel
+
+    def run():   # the thread's own entry point takes nothing; `fn` is what gets `cancel`
         try:
-            fn()
+            fn(cancel)
+        except core.Cancelled:
+            S.log("info", "Cancelled.")
         except Exception as e:
             S.log("error", core.friendly_error(e))
         finally:
             if S.busy_token is token:  # the task may have updated the label with its progress
-                S.busy, S.busy_token = "", None
+                S.busy, S.busy_token, S.busy_cancel = "", None, None
     threading.Thread(target=run, daemon=True).start()
+
+
+def act_cancel_task(_):
+    """Stop whatever background job is running (fetching, matching, importing)."""
+    if S.busy_cancel:
+        S.busy_cancel.set()
+        S.busy = "Cancelling…"
 
 
 def act_login(body):
@@ -290,7 +315,7 @@ def act_login(body):
     cancel, done = threading.Event(), threading.Event()
     S.signing_in = (cancel, done)
 
-    def run():
+    def run(cancel):
         try:
             S.log("info", "Opened a Chrome window. Sign in to osu! there.")
             user = core.sign_in(PROFILE_DIR, cancel, done)
@@ -306,7 +331,7 @@ def act_login(body):
 
 def _adopt_browser_session():
     """Copy the osu! session out of the user's browser into our Chrome profile."""
-    def run():
+    def run(cancel):
         try:
             cookies, db = core.browser_osu_session()
             user = core.import_browser_session(PROFILE_DIR, cookies)
@@ -368,7 +393,7 @@ def verify_sign_in():
     if not PROFILE_DIR.is_dir() or S.busy:
         return
 
-    def run():
+    def run(cancel):
         user = core.check_profile(PROFILE_DIR)
         if S.user and not user:
             S.log("warn", "Your osu! sign-in has expired. Please sign in again.")
@@ -389,10 +414,10 @@ def act_fetch(body):
     S.last_user_query = body.get("user", "")
     S.save_config()
 
-    def run():
+    def run(cancel):
         cut = f" played at least {min_plays} times" if min_plays else ""
         S.log("info", f"Fetching up to {limit} maps{cut} from {query}'s {kind.replace('_', ' ')} list…")
-        items = core.fetch_user_maps(query, kind, limit, min_plays=min_plays,
+        items = core.fetch_user_maps(query, kind, limit, min_plays=min_plays, stop=cancel,
                                      on_progress=lambda n: setattr(S, "busy", f"Fetching… {n} maps"))
         S.set_queue(items)
         have = sum(1 for i in items if i["status"] == "have")
@@ -402,6 +427,34 @@ def act_fetch(body):
 
 MAX_TRACKS = 500
 SEARCH_GAP = 0.25  # searches are cheap, but there's no reason to hammer a mirror with them
+
+
+def act_spotify(body):
+    """Pull a Spotify playlist's songs in, then match them like any other list."""
+    if S.running() or S.busy:
+        raise ValueError("Wait for the current download to finish first.")
+    link = (body.get("link") or "").strip()
+    core.parse_spotify_link(link)  # fail fast on a bad link
+    if not S.spotify["secret"]:
+        raise ValueError("Add your Spotify client ID and secret in Folders & options first.")
+    limit = max(1, min(int(body.get("limit") or MAX_TRACKS), MAX_TRACKS))
+
+    def run(cancel):
+        S.log("info", "Reading the playlist from Spotify…")
+        tracks = core.fetch_spotify_tracks(link, S.spotify["id"], S.spotify["secret"],
+                                           limit=limit, stop=cancel,
+                                           on_progress=lambda n: setattr(S, "busy", f"Reading… {n} songs"))
+        if not tracks:
+            S.log("warn", "That playlist has no songs the app can read.")
+            return
+        S.log("ok", f"Got {len(tracks)} songs. Looking for beatmaps…")
+        with S.lock:
+            S.matches, S.match_total = [], len(tracks)
+        try:
+            _match_tracks(tracks, cancel)
+        finally:
+            _report_matches(len(tracks))
+    in_background("Reading the playlist…", run)
 
 
 def act_match(body):
@@ -416,24 +469,37 @@ def act_match(body):
     with S.lock:
         S.matches, S.match_total = [], len(tracks)
 
-    def run():
-        for i, (artist, title) in enumerate(tracks, 1):
-            try:
-                candidates = core.match_track(artist, title)[:6]
-            except Exception as e:
-                candidates = []
-                if i == 1:  # a dead search endpoint would otherwise repeat this 500 times
-                    S.log("warn", f"Beatmap search failed: {core.friendly_error(e)}")
-            good = candidates and candidates[0]["text"] >= core.MATCH_FLOOR
-            with S.lock:
-                S.matches.append({"artist": artist, "title": title, "candidates": candidates,
-                                  "pick": 0 if good else -1, "include": bool(good)})
-            S.busy = f"Matching… {i}/{len(tracks)}"
-            if i < len(tracks):
-                time.sleep(SEARCH_GAP)
-        found = sum(1 for m in S.matches if m["pick"] >= 0)
-        S.log("ok", f"Matched {found} of {len(tracks)} songs. Check the picks, then add them to the queue.")
+    def run(cancel):
+        try:
+            _match_tracks(tracks, cancel)
+        finally:
+            _report_matches(len(tracks))  # keep whatever was matched before stopping
     in_background("Matching…", run)
+
+
+def _match_tracks(tracks, cancel):
+    for i, (artist, title) in enumerate(tracks, 1):
+        core._check(cancel)
+        try:
+            candidates = core.match_track(artist, title)[:6]
+        except Exception as e:
+            candidates = []
+            if i == 1:  # a dead search endpoint would otherwise repeat this 500 times
+                S.log("warn", f"Beatmap search failed: {core.friendly_error(e)}")
+        good = candidates and candidates[0]["text"] >= core.MATCH_FLOOR
+        with S.lock:
+            S.matches.append({"artist": artist, "title": title, "candidates": candidates,
+                              "pick": 0 if good else -1, "include": bool(good)})
+        S.busy = f"Matching… {i}/{len(tracks)}"
+        if i < len(tracks):
+            time.sleep(SEARCH_GAP)
+
+
+def _report_matches(total):
+    found = sum(1 for m in S.matches if m["pick"] >= 0)
+    S.log("ok", f"Matched {found} of {len(S.matches)} songs"
+                + (f" (stopped early, {total} asked for)." if len(S.matches) < total else ".")
+                + " Check the picks, then add them to the queue.")
 
 
 def act_match_pick(body):
@@ -448,7 +514,9 @@ def act_match_pick(body):
 
 
 def act_match_queue(_):
-    """Put every confirmed match into the download queue."""
+    """Add every confirmed match to the download queue."""
+    if S.running():
+        raise ValueError("Stop the download before changing the queue.")
     items, seen = [], set()
     with S.lock:
         for row in S.matches:
@@ -462,8 +530,33 @@ def act_match_queue(_):
                           "creator": chosen["creator"], "cover": "", "plays": 0})
     if not items:
         raise ValueError("Nothing confirmed yet: pick a beatmap for at least one song.")
-    S.set_queue(items)
-    S.log("ok", f"Queued {len(items)} beatmap sets from your playlist.")
+    before = len(S.queue)
+    S.set_queue(items, append=True)     # the button says "add", so don't throw the rest away
+    added = len(S.queue) - before
+    S.log("ok", f"Added {added} beatmap set{'' if added == 1 else 's'} from your playlist"
+                + (f" ({len(items) - added} already in the queue)." if added < len(items) else "."))
+
+
+def act_match_bulk(body):
+    """Tick or untick matches in one go, optionally only the confident ones."""
+    what = body.get("what", "all")
+    changed = 0
+    with S.lock:
+        for row in S.matches:
+            if not row["candidates"]:
+                continue
+            best = row["candidates"][0]["text"]
+            if what == "none":
+                want = False
+            elif what == "good":
+                want = best >= 0.85
+            else:
+                want = True
+            if want and row["pick"] < 0:
+                row["pick"] = 0
+            row["include"] = want and row["pick"] >= 0
+            changed += 1
+    return {"changed": changed}
 
 
 def act_clear_matches(_):
@@ -481,9 +574,9 @@ def act_collection(body):
     core.parse_collection_id(link)  # fail fast on a bad link, before going to the background
     limit = max(1, min(int(body.get("limit") or 20000), 20000))
 
-    def run():
+    def run(cancel):
         S.log("info", "Reading the collection from osu!collector…")
-        info, items = core.fetch_collection(link, limit=limit,
+        info, items = core.fetch_collection(link, limit=limit, stop=cancel,
                                             on_progress=lambda n: setattr(S, "busy", f"Reading… {n} sets"))
         S.set_queue(items)
         have = sum(1 for i in items if i["status"] == "have")
@@ -512,6 +605,10 @@ def act_settings(body):
             S.folder = body["folder"].strip()
         if "songs_dir" in body:
             S.songs_dir = body["songs_dir"].strip()
+        if "spotify" in body:
+            for key in ("id", "secret"):
+                if key in body["spotify"]:
+                    S.spotify[key] = (body["spotify"][key] or "").strip()
         if "lazer_dir" in body:
             folder = body["lazer_dir"].strip()
             if folder and not (Path(folder) / "files").is_dir():
@@ -625,10 +722,11 @@ def act_open_all(_):
 
     client = S.opts["import_client"]
 
-    def run():
+    def run(cancel):
         S.log("info", f"Sending {len(files)} maps to osu!{client}…")
         used, failed, sent = client, [], 0
         for start in range(0, len(files), core.IMPORT_BATCH):
+            core._check(cancel)
             batch = files[start:start + core.IMPORT_BATCH]
             used, bad = core.import_batch(batch, client, S.songs_dir, S.osu_paths, log=S.log)
             failed += bad
@@ -718,8 +816,9 @@ def act_scan(body):
 
 ACTIONS = {
     "login": act_login, "cancel-login": act_cancel_login, "finish-login": act_finish_login, "logout": act_logout, "fetch": act_fetch, "paste": act_paste,
-    "collection": act_collection, "match": act_match, "match-pick": act_match_pick,
-    "match-queue": act_match_queue, "clear-matches": act_clear_matches, "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
+    "cancel-task": act_cancel_task, "collection": act_collection, "match": act_match,
+    "spotify": act_spotify, "match-pick": act_match_pick,
+    "match-queue": act_match_queue, "match-bulk": act_match_bulk, "clear-matches": act_clear_matches, "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
     "retry": act_retry, "toggle": act_toggle, "clear-queue": act_clear_queue,
     "clear-history": act_clear_history, "open-all": act_open_all,
     "open-folder": act_open_folder, "browse": act_browse, "scan": act_scan,
