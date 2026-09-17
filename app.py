@@ -397,6 +397,31 @@ def act_fetch(body):
     in_background("Fetching…", run)
 
 
+def act_collection(body):
+    """Queue every beatmap set in a shared osu!collector collection."""
+    if S.running() or S.busy:
+        raise ValueError("Wait for the current download to finish first.")
+    link = (body.get("link") or "").strip()
+    if not link:
+        raise ValueError("Paste an osu!collector link, e.g. https://osucollector.com/collections/23333")
+    core.parse_collection_id(link)  # fail fast on a bad link, before going to the background
+    limit = max(1, min(int(body.get("limit") or 20000), 20000))
+
+    def run():
+        S.log("info", "Reading the collection from osu!collector…")
+        info, items = core.fetch_collection(link, limit=limit,
+                                            on_progress=lambda n: setattr(S, "busy", f"Reading… {n} sets"))
+        S.set_queue(items)
+        have = sum(1 for i in items if i["status"] == "have")
+        by = f" by {info['uploader']}" if info["uploader"] else ""
+        S.log("ok", f"“{info['name']}”{by}: {len(items)} beatmap sets"
+                    + (f", {have} of which you already have." if have else "."))
+        if info["unsubmitted"]:
+            S.log("warn", f"{info['unsubmitted']} map(s) in this collection were never submitted to "
+                          f"osu!, so they can't be downloaded from anywhere.")
+    in_background("Reading the collection…", run)
+
+
 def act_paste(body):
     if S.running() or S.busy:
         raise ValueError("Wait for the current download to finish first.")
@@ -619,7 +644,7 @@ def act_scan(body):
 
 ACTIONS = {
     "login": act_login, "cancel-login": act_cancel_login, "finish-login": act_finish_login, "logout": act_logout, "fetch": act_fetch, "paste": act_paste,
-    "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
+    "collection": act_collection, "settings": act_settings, "start": act_start, "pause": act_pause, "stop": act_stop,
     "retry": act_retry, "toggle": act_toggle, "clear-queue": act_clear_queue,
     "clear-history": act_clear_history, "open-all": act_open_all,
     "open-folder": act_open_folder, "browse": act_browse, "scan": act_scan,

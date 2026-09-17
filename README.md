@@ -43,7 +43,7 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 
 ## Features
 
-- **Grab whole lists at once.** A player's *most played*, *favourites*, *ranked*, *loved*, *guest* or *graveyard* maps. You can also paste IDs/links or open a `.txt` a friend sent you.
+- **Grab whole lists at once.** A player's *most played*, *favourites*, *ranked*, *loved*, *guest* or *graveyard* maps, or a shared **[osu!collector](https://osucollector.com) collection** — a farm list, a tournament pool, a friend's favourites. You can also paste IDs/links or open a `.txt` a friend sent you.
 - **Top N, not everything.** *Most played* is ordered by play count, so *How many* gives you exactly your top N maps, with the play count shown on every row. Or set a **minimum play count** and take everything you actually played.
 - **Fast by default.** Maps come from public **beatmap mirrors**: no sign-in, no browser and no hourly limit, which is roughly **ten times faster**. Switch to official osu.ppy.sh downloads whenever you prefer.
 - **Runs invisibly.** When the website is used, Chrome works in the background (headless). No windows popping up, no need to close your browser first.
@@ -104,7 +104,9 @@ The app doesn't control that window or read what you type.
 
 ### 2. Choose beatmaps
 
-Type a player name (or leave it empty for yourself), pick a list and how many maps you want. Or switch to **From a list** and paste IDs or links.
+Type a player name (or leave it empty for yourself), pick a list and how many maps you want. Or switch
+to **From a collection** and paste an [osu!collector](https://osucollector.com) link, or to **From a list**
+and paste IDs or links.
 
 **Most played** is ordered by play count, highest first, so *How many* = **your top N most played maps**.
 Set it to 50 for a quick refresher, or to a few thousand to pull a whole library back. Each row shows how
@@ -183,6 +185,7 @@ When it's done, click **Import all into osu!** (or tick *Import as they finish* 
 
 | Problem | Fix |
 |---|---|
+| **A collection has maps nothing can download** | osu!collector collections can contain maps that were never submitted to osu!. The app says how many and skips them; they don't exist on any mirror. |
 | **"No mirror has this beatmap"** | Very new, unranked or deleted maps may not be mirrored yet. Tick **Fall back to osu.ppy.sh** (and sign in) to fetch those from the website. |
 | **osu!lazer says "IPC took too long"** | A lazer that was already running stopped accepting imports. Close and reopen lazer; the maps stay in the download folder, so **Import all into osu!** picks them up. |
 | **Downloads got slow after a while** | A mirror has throttled or is busy. The app measures each one and switches to the quickest by itself, re-checking every 10 minutes; the *Activity log* names the mirror in use and its speed. |
@@ -311,7 +314,7 @@ Double-click **`build.bat`**. It produces:
 | Path | What it is |
 |---|---|
 | [`app.py`](app.py) | Local web server and the actions behind every button |
-| [`osu_core.py`](osu_core.py) | osu! profile lists, beatmap mirrors, headless Chrome downloader, osu!stable/lazer detection and library scanning |
+| [`osu_core.py`](osu_core.py) | osu! profile lists, osu!collector collections, beatmap mirrors, headless Chrome downloader, osu!stable/lazer detection and library scanning |
 | [`web/index.html`](web/index.html) | The whole interface, in plain HTML, CSS and JavaScript |
 | [`build.bat`](build.bat) · [`tools/`](tools) · [`assets/`](assets) | Release packaging (PyInstaller) and the app icon |
 | [`start.bat`](start.bat) · [`start.sh`](start.sh) | Run-from-source launchers for Windows, and for Linux/macOS |

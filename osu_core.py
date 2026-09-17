@@ -105,6 +105,61 @@ def fetch_user_maps(user, kind, limit, on_progress=None, min_plays=0):
     return out
 
 
+# ---------------------------------------------------------------- osu!collector
+#
+# Collections are lists other players share, so they're just another way of naming a pile of
+# beatmap sets. The paginated endpoint carries artist/title/creator alongside the IDs, which
+# the flat one doesn't, and that metadata is what lets an already-owned map be recognised.
+
+OSU_COLLECTOR = "https://osucollector.com"
+COLLECTOR_PAGE = 100  # the API caps a page at this many beatmaps however much we ask for
+
+
+def parse_collection_id(text):
+    """The collection ID out of an osu!collector link, or a bare number."""
+    text = (text or "").strip()
+    m = re.search(r"osucollector\.com/collections/(\d+)", text) or re.fullmatch(r"(\d+)", text)
+    if not m:
+        raise ValueError("Paste an osu!collector link, e.g. https://osucollector.com/collections/23333")
+    return m.group(1)
+
+
+def fetch_collection(text, limit=20000, on_progress=None):
+    """Return (collection info, [{id, title, artist, creator}]) for an osu!collector collection."""
+    cid = parse_collection_id(text)
+    try:
+        info = _get_json(f"{OSU_COLLECTOR}/api/collections/{cid}?perPage=1")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise ValueError(f"osu!collector has no collection {cid}.") from None
+        raise
+    out, seen, cursor = [], set(), None
+    while len(out) < limit:
+        url = f"{OSU_COLLECTOR}/api/collections/{cid}/beatmapsv2?perPage={COLLECTOR_PAGE}"
+        page = _get_json(url + (f"&cursor={cursor}" if cursor else ""))
+        rows = page.get("beatmaps") or []
+        for row in rows:
+            meta = row.get("beatmapset") or {}
+            sid = str(row.get("beatmapset_id") or meta.get("id") or "")
+            if not sid or sid in seen:
+                continue  # a set appears once per difficulty
+            seen.add(sid)
+            out.append({"id": sid, "title": meta.get("title", ""), "artist": meta.get("artist", ""),
+                        "creator": meta.get("creator", ""), "cover": "", "plays": 0})
+            if len(out) >= limit:
+                break
+        if on_progress:
+            on_progress(len(out))
+        if not page.get("hasMore") or not rows:
+            break
+        cursor = page.get("nextPageCursor")
+        if not cursor:
+            break
+    return {"id": cid, "name": info.get("name") or f"Collection {cid}",
+            "uploader": (info.get("uploader") or {}).get("username", ""),
+            "unsubmitted": info.get("unsubmittedBeatmapCount") or 0}, out
+
+
 def scan_songs_folder(path):
     """Beatmapset IDs present in an osu!stable Songs folder (folders are named '<id> Artist - Title')."""
     ids = set()

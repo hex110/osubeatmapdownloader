@@ -253,10 +253,11 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
 <!-- STEP 2 -->
 <section class="card" id="step2">
   <h2><span class="n" id="n2">2</span> Choose beatmaps</h2>
-  <p class="sub">Grab maps from any player's profile, or paste a list a friend shared with you.</p>
+  <p class="sub">Grab maps from any player's profile, a shared osu!collector collection, or a list a friend sent you.</p>
 
   <div class="tabs" role="tablist">
     <button class="on" data-tab="profile" onclick="tab('profile')">From a profile</button>
+    <button data-tab="collection" onclick="tab('collection')">From a collection</button>
     <button data-tab="list" onclick="tab('list')">From a list</button>
   </div>
 
@@ -307,6 +308,26 @@ footer { color: var(--dim); font-size: 12px; text-align: center; margin-top: 30p
         <input id="minPlays" type="number" min="0" value="0">
       </div>
       <button class="btn primary" id="fetchBtn" onclick="fetchMaps()">Find maps</button>
+    </div>
+  </div>
+
+  <div id="tab-collection" class="hidden">
+    <div class="row">
+      <div class="grow">
+        <label class="f" for="collectionLink">osu!collector link</label>
+        <input id="collectionLink" type="text" placeholder="https://osucollector.com/collections/23333">
+      </div>
+      <div style="width:110px">
+        <label class="f" for="collectionLimit">How many</label>
+        <input id="collectionLimit" type="number" min="1" max="20000" value="20000">
+      </div>
+      <button class="btn primary" id="collectionBtn" onclick="loadCollection()">Load collection</button>
+    </div>
+    <div class="help" style="margin-top:10px">
+      Collections are map lists players share on
+      <a href="https://osucollector.com" target="_blank" rel="noopener">osu!collector</a> — a farm list, a
+      tournament pool, a friend's favourites. Paste the link and every map in it joins the queue;
+      anything you already have is skipped as usual.
     </div>
   </div>
 
@@ -506,6 +527,7 @@ function esc(s) {
 function tab(name) {
   document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
   $('tab-profile').classList.toggle('hidden', name !== 'profile');
+  $('tab-collection').classList.toggle('hidden', name !== 'collection');
   $('tab-list').classList.toggle('hidden', name !== 'list');
 }
 
@@ -513,6 +535,10 @@ function tab(name) {
 function fetchMaps() {
   act('fetch', {user: $('userQuery').value, kind: $('kind').value, limit: +$('limit').value,
                 min_plays: $('kind').value === 'most_played' ? +$('minPlays').value : 0});
+}
+
+function loadCollection() {
+  act('collection', {link: $('collectionLink').value, limit: +$('collectionLimit').value});
 }
 
 function pasteList() { act('paste', {text: $('pasteBox').value}); }
@@ -561,6 +587,7 @@ $('kind').addEventListener('change', () => {
   $('minPlaysBox').classList.toggle('hidden', $('kind').value !== 'most_played');
 });
 $('userQuery').addEventListener('keydown', e => e.key === 'Enter' && fetchMaps());
+$('collectionLink').addEventListener('keydown', e => e.key === 'Enter' && loadCollection());
 
 function setFilter(f) { filter = f; listKey = ''; render(); }
 
@@ -697,6 +724,7 @@ function render() {
     ? `This app remembers ${S.history_count} maps you've downloaded and skips them. <button class="linkbtn" onclick="if(confirm('Forget download history?')) act('clear-history')">Forget</button> · <a href="/api/export?which=history">Export</a>`
     : '';
   $('fetchBtn').disabled = !!S.busy || S.running;
+  $('collectionBtn').disabled = !!S.busy || S.running;
   const hasQueue = S.queue.length > 0;
   $('n2').classList.toggle('ok', hasQueue); $('n2').textContent = hasQueue ? '✓' : '2';
   $('step2').classList.toggle('locked', S.running);
