@@ -133,9 +133,10 @@ class Scoring(unittest.TestCase):
         self.assertEqual(core._norm_song("Say it. feat. someone"), core._norm_song("Say it"))
 
     def test_a_nonsense_song_does_not_clear_the_floor(self):
-        score, text = core.score_candidate("Nobody", "zzzz xyzzy nothing",
-                                           self.candidate("Camellia", "GHOST"))
+        score, text, title = core.score_candidate("Nobody", "zzzz xyzzy nothing",
+                                                  self.candidate("Camellia", "GHOST"))
         self.assertLess(text, core.MATCH_FLOOR)
+        self.assertLess(title, core.TITLE_FLOOR)
 
 
 if __name__ == "__main__":
@@ -184,3 +185,56 @@ class FetchFilters(unittest.TestCase):
 
     def test_an_entry_with_no_difficulty_data_is_kept(self):
         self.assertTrue(core.wanted({"beatmaps": []}, "favourite", mode="osu", stars=(4, 5)))
+
+
+class SpotifyEmbedShape(unittest.TestCase):
+    """The embed page's JSON moves around, so the track list is found by shape."""
+
+    def test_finds_the_track_list_however_deeply_it_is_buried(self):
+        blob = {"props": {"pageProps": {"state": {"data": {"entity": {
+            "name": "My Playlist",
+            "trackList": [{"title": "Believer", "subtitle": "Imagine Dragons"}]}}}}}}
+        entry = core._find_track_list(blob)
+        self.assertEqual(entry["name"], "My Playlist")
+        self.assertEqual(len(entry["trackList"]), 1)
+
+    def test_returns_nothing_when_there_is_no_track_list(self):
+        self.assertIsNone(core._find_track_list({"props": {"a": [1, 2, {"b": "c"}]}}))
+
+
+class ExportifyCsv(unittest.TestCase):
+    """The file Exportify actually produces, byte for byte."""
+
+    HEADER = ("﻿Track URI,Track Name,Album Name,Artist Name(s),Release Date,Duration (ms),"
+              "Popularity,Explicit,Added By,Added At,Genres,Record Label\n")
+
+    def test_the_byte_order_mark_and_column_order(self):
+        # Exportify writes a BOM and puts Album before Artist
+        csv = self.HEADER + 'spotify:track:x,"Believer","Evolve","Imagine Dragons",2017,204000,80,false,u,t,"","Label"\n'
+        self.assertEqual(core.parse_tracks(csv), [("Imagine Dragons", "Believer")])
+
+    def test_several_artists_are_separated_by_a_semicolon(self):
+        csv = self.HEADER + 'spotify:track:y,"Stargirl Interlude","Starboy","The Weeknd;Lana Del Rey",2016,111640,78,false,u,t,"","XO"\n'
+        self.assertEqual(core.parse_tracks(csv), [("The Weeknd", "Stargirl Interlude")])
+
+    def test_a_comma_separated_artist_list_still_works(self):
+        csv = self.HEADER + 'spotify:track:z,"Say It","Elma","Yorushika, n-buna",2019,200000,60,false,u,t,"","Label"\n'
+        self.assertEqual(core.parse_tracks(csv), [("Yorushika", "Say It")])
+
+
+class ConfidentMatches(unittest.TestCase):
+    """A right artist with a wrong title must not be picked automatically."""
+
+    def candidate(self, text, title_score):
+        return {"text": text, "title_score": title_score}
+
+    def test_a_wrong_title_is_not_confident_even_with_the_right_artist(self):
+        # "Matt Maltese - little person" scored 0.579 against "As The World Caves In"
+        self.assertFalse(core.confident(self.candidate(0.579, 0.353)))
+
+    def test_a_matching_name_is_confident(self):
+        self.assertTrue(core.confident(self.candidate(0.95, 1.0)))
+
+    def test_nothing_at_all_is_not_confident(self):
+        self.assertFalse(core.confident(None))
+        self.assertFalse(core.confident({}))

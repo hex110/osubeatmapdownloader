@@ -51,6 +51,7 @@ So far, this is still the best way that I know of to recover lost beatmaps folde
 - **Skips what you already have.** Maps in your **osu!lazer library**, your osu!stable `Songs` folder, the download folder, or downloaded in an earlier session. Even maps too old to carry a beatmap ID, which are matched by artist, title and mapper.
 - **Signs in through your own browser.** No separate Chrome window to hunt for, and nothing to do at all if you're already signed in to osu! there.
 - **Picks up where it left off.** The queue is saved, so closing the app mid-run doesn't lose your place.
+- **Shows what it's doing.** The map being fetched, which mirror it came from, how fast and how far along.
 - **Checks its work.** osu!lazer can accept a beatmap and quietly not import it, so the app looks afterwards and tells you which ones didn't arrive.
 - **Tells you the size first.** *Estimate size* samples a few maps and says how much disk the queue needs, and how much you have.
 - **Never hangs on one map.** A download that stops making progress for 10 seconds is abandoned and the next mirror is tried, so one bad server can't stall a long queue.
@@ -116,14 +117,16 @@ and paste songs, or to **From a list** and paste IDs or links.
 
 <br>
 
-Paste a **Spotify playlist link** and the app reads it directly. That needs a free Spotify app of your
-own — make one at [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) and put its
-*Client ID* and *Client secret* in **Folders & options → Spotify**. Spotify requires this even for public
-playlists, and it won't share its own editorial playlists with an app at all.
+**Paste a Spotify playlist link.** Nothing to set up: the track list is read from Spotify's own public
+page for the playlist. That page stops at the first **100 songs**, so for a longer playlist either use
+Exportify below, or add a free Spotify app's *Client ID* and *Client secret* in **Folders & options →
+Connections**, which lifts the limit.
 
-Or skip that entirely: export a playlist to CSV with a tool like [Exportify](https://exportify.net) and
-paste it in, or just type `Artist - Title` lines. Every song is searched on osu! and the most played
-matching beatmap is picked.
+**Or export it with [Exportify](https://exportify.net)**, which has no length limit and works for other
+services too: sign in with Spotify, press *Export* next to the playlist, and open the `.csv` it saves.
+The file it produces is read exactly as it comes, and you can type `Artist - Title` lines by hand instead.
+
+Every song is searched on osu! and the most played matching beatmap is picked.
 
 **Check the picks before queueing.** A search can't tell a song from its remix, its TV-size cut or a cover,
 so each row has a dropdown with the other candidates (mapper, play count and ranked status shown) and a

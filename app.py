@@ -486,15 +486,25 @@ def act_spotify(body):
         raise ValueError("Wait for the current download to finish first.")
     link = (body.get("link") or "").strip()
     core.parse_spotify_link(link)  # fail fast on a bad link
-    if not S.spotify["secret"]:
-        raise ValueError("Add your Spotify client ID and secret in Folders & options first.")
     limit = max(1, min(int(body.get("limit") or MAX_TRACKS), MAX_TRACKS))
+    keyed = bool(S.spotify["secret"])
 
     def run(cancel):
         S.log("info", "Reading the playlist from Spotify…")
-        tracks = core.fetch_spotify_tracks(link, S.spotify["id"], S.spotify["secret"],
-                                           limit=limit, stop=cancel,
-                                           on_progress=lambda n: setattr(S, "busy", f"Reading… {n} songs"))
+        if keyed:
+            tracks = core.fetch_spotify_tracks(
+                link, S.spotify["id"], S.spotify["secret"], limit=limit, stop=cancel,
+                on_progress=lambda n: setattr(S, "busy", f"Reading… {n} songs"))
+        else:
+            # no credentials needed: Spotify's own embed page lists the tracks
+            tracks, name = core.fetch_spotify_embed(link, limit=min(limit, core.EMBED_LIMIT),
+                                                    stop=cancel)
+            if name:
+                S.log("info", f"Playlist: “{name}”.")
+            if len(tracks) >= core.EMBED_LIMIT:
+                S.log("warn", f"Spotify's public page only lists the first {core.EMBED_LIMIT} "
+                              f"songs. For a longer playlist, add a client ID and secret in "
+                              f"Folders & options.")
         if not tracks:
             S.log("warn", "That playlist has no songs the app can read.")
             return
@@ -537,7 +547,7 @@ def _match_tracks(tracks, cancel):
             candidates = []
             if i == 1:  # a dead search endpoint would otherwise repeat this 500 times
                 S.log("warn", f"Beatmap search failed: {core.friendly_error(e)}")
-        good = candidates and candidates[0]["text"] >= core.MATCH_FLOOR
+        good = bool(candidates) and core.confident(candidates[0])
         with S.lock:
             S.matches.append({"artist": artist, "title": title, "candidates": candidates,
                               "pick": 0 if good else -1, "include": bool(good)})
@@ -598,11 +608,10 @@ def act_match_bulk(body):
         for row in S.matches:
             if not row["candidates"]:
                 continue
-            best = row["candidates"][0]["text"]
             if what == "none":
                 want = False
             elif what == "good":
-                want = best >= 0.85
+                want = core.confident(row["candidates"][0])
             else:
                 want = True
             if want and row["pick"] < 0:
@@ -1105,7 +1114,7 @@ def _queue_songs_from_args():
     if "--confident-only" in sys.argv:
         act_match_bulk({"what": "good"})
     unsure = sum(1 for m in S.matches if m["include"]
-                 and m["candidates"][m["pick"]]["text"] < 0.85)
+                 and not core.confident(m["candidates"][m["pick"]]))
     if unsure:
         S.log("warn", f"{unsure} song(s) matched a beatmap only loosely. Nobody is here to "
                       f"check them; use --confident-only to queue just the clear ones.")

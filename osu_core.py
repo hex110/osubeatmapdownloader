@@ -221,6 +221,7 @@ SEARCH_STATUS = {-2: "graveyard", -1: "wip", 0: "pending", 1: "ranked",
                  2: "approved", 3: "qualified", 4: "loved"}
 GOOD_STATUS = (1, 2, 4)      # ranked, approved, loved
 MATCH_FLOOR = 0.55           # below this the names simply don't agree
+TITLE_FLOOR = 0.6            # ...and the song's own name has to be most of the reason
 
 
 def _norm_song(text):
@@ -260,7 +261,8 @@ def parse_tracks(text):
                 title = column(row, "track name", "song", "title")
                 artist = column(row, "artist name", "artist")
                 if title:
-                    out.append((artist.split(",")[0].strip(), title))
+                    # Exportify writes several artists as "A;B", other exports use "A, B"
+                    out.append((re.split(r"[;,]", artist)[0].strip(), title))
             if out:
                 return out
     out = []
@@ -310,8 +312,67 @@ def spotify_token(client_id, client_secret):
         raise
 
 
+# Spotify's own embed page carries the track list in the JSON its player is built from, so a
+# public playlist can be read with no credentials at all. It stops at 100 tracks, and it is
+# their web page rather than a documented API, so the credentialed path below stays for
+# longer playlists and for when this stops working.
+EMBED_LIMIT = 100
+BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/124.0 Safari/537.36")
+
+
+def _find_track_list(node):
+    """The player's trackList, wherever Spotify has nested it this month."""
+    if isinstance(node, dict):
+        if isinstance(node.get("trackList"), list):
+            return node
+        for value in node.values():
+            found = _find_track_list(value)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _find_track_list(value)
+            if found:
+                return found
+    return None
+
+
+def fetch_spotify_embed(link, limit=EMBED_LIMIT, stop=None):
+    """[(artist, title)] from a public playlist, without any credentials. Capped at 100."""
+    kind, sid = parse_spotify_link(link)
+    _check(stop)
+    req = urllib.request.Request(f"https://open.spotify.com/embed/{kind}/{sid}",
+                                 headers={"User-Agent": BROWSER_UA,
+                                          "Accept-Language": "en"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            html = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        if e.code in (404, 400):
+            raise ValueError("Spotify has no such playlist, or it isn't public.") from None
+        raise ValueError(f"Spotify's page wouldn't load (HTTP {e.code}).") from None
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        raise ValueError("Couldn't read that playlist from Spotify's page. Add a client ID and "
+                         "secret in Folders & options to use Spotify's proper API instead.")
+    try:
+        entry = _find_track_list(json.loads(m.group(1))) or {}
+    except ValueError:
+        entry = {}
+    out = []
+    for track in (entry.get("trackList") or [])[:limit]:
+        title = (track.get("title") or "").strip()
+        artist = (track.get("subtitle") or "").split(",")[0].strip()
+        if title:
+            out.append((artist, title))
+    if not out:
+        raise ValueError("That playlist looks empty, or Spotify wouldn't share it.")
+    return out, entry.get("name") or ""
+
+
 def fetch_spotify_tracks(link, client_id, client_secret, limit=500, on_progress=None, stop=None):
-    """[(artist, title)] from a public Spotify playlist or album."""
+    """[(artist, title)] from a public Spotify playlist or album, using Spotify's API."""
     kind, sid = parse_spotify_link(link)
     token = spotify_token(client_id, client_secret)
     headers = {"Authorization": f"Bearer {token}", "User-Agent": UA, "Accept": "application/json"}
@@ -387,7 +448,19 @@ def score_candidate(artist, title, candidate):
     weight = candidate["plays"] + 50 * candidate["favourites"]
     popularity = min(1.0, math.log10(1 + weight) / 6)
     bonus = 0.05 if candidate["status"] in ("ranked", "approved", "loved") else 0.0
-    return round(min(1.0, 0.75 * text + 0.20 * popularity + bonus), 4), round(text, 4)
+    return (round(min(1.0, 0.75 * text + 0.20 * popularity + bonus), 4),
+            round(text, 4), round(title_score, 4))
+
+
+def confident(candidate):
+    """Whether a candidate is a safe automatic choice.
+
+    The blended score isn't enough on its own: a right artist with a wrong title scores 0.58
+    and would sail past the floor, which is how "Matt Maltese - little person" quietly became
+    "As The World Caves In". The song's own name has to agree too.
+    """
+    return bool(candidate) and candidate.get("text", 0) >= MATCH_FLOOR \
+        and candidate.get("title_score", 0) >= TITLE_FLOOR
 
 
 def match_track(artist, title, amount=8):
@@ -398,8 +471,8 @@ def match_track(artist, title, amount=8):
         candidates = search_beatmaps(title, amount=amount)  # the artist name may differ on osu!
     scored = []
     for candidate in candidates:
-        score, text = score_candidate(artist, title, candidate)
-        scored.append({**candidate, "score": score, "text": text})
+        score, text, title_score = score_candidate(artist, title, candidate)
+        scored.append({**candidate, "score": score, "text": text, "title_score": title_score})
     scored.sort(key=lambda c: c["score"], reverse=True)
     return scored
 
@@ -589,7 +662,7 @@ def _best_known_rate(exclude):
 
 
 def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, stop=None,
-                         stall=DEFAULT_STALL):
+                         stall=DEFAULT_STALL, on_progress=None):
     """Fetch one beatmapset from the first mirror that has it.
 
     Returns (path, mirror name) on success or (None, reason). Tries every mirror before
@@ -623,6 +696,8 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
                 if not first.startswith(b"PK"):  # every .osz is a zip
                     reason = f"{name}: didn't send a beatmap file."
                     continue
+                total_size = int(r.headers.get("Content-Length") or 0)
+                last_told = 0.0
                 target = Path(folder) / _osz_name(sid, r.headers.get("Content-Disposition"), item)
                 tmp = target.with_name(target.name + ".part")
                 size = 0
@@ -639,6 +714,9 @@ def download_from_mirror(sid, folder, item=None, no_video=False, timeout=90, sto
                         f.write(chunk)
                         size += len(chunk)
                         window_bytes += len(chunk)
+                        if on_progress and time.time() - last_told > 0.25:
+                            last_told = time.time()
+                            on_progress(name, size, total_size, size / max(0.001, time.time() - began))
                         if time.time() - window_start > stall:
                             if window_bytes < TRICKLE_FLOOR * stall:
                                 raise _Stalled
@@ -1277,6 +1355,7 @@ class Downloader:
         self.mirror_first = opts.get("source", "mirror") == "mirror"
         self.allow_browser = not self.mirror_first or bool(opts.get("mirror_fallback", True))
         self.mirror_used = None
+        self.now = {}              # what's being fetched right now, for the UI to show
         self.pending_import = []   # finished maps waiting to go to osu! as one batch
         self.failed_import = []
         # progress/ETA bookkeeping, read by the UI
@@ -1324,6 +1403,8 @@ class Downloader:
             t = batch_start = resumed
             cap = limit
         return {
+            "now": self.now,
+            "mirror": self.mirror_used or "",
             "eta": round(t - now),
             "hourly_limit": limit,
             "limited": bool(self.quota_hit_at),
@@ -1535,10 +1616,16 @@ class Downloader:
         if existing:
             return existing, ""
         if self.mirror_first:
+            def progress(mirror, done, total, rate):
+                self.now = {"id": sid, "title": item.get("title", ""), "artist": item.get("artist", ""),
+                            "source": mirror, "done": done, "total": total, "rate": rate}
+
             path, who = download_from_mirror(sid, self.folder, item,
                                              no_video=bool(self.opts.get("no_video")),
                                              timeout=timeout, stop=self.stop_flag,
-                                             stall=self.opts.get("stall", DEFAULT_STALL))
+                                             stall=self.opts.get("stall", DEFAULT_STALL),
+                                             on_progress=progress)
+            self.now = {}
             if path:
                 if who != self.mirror_used:  # say which mirror only when it changes
                     self.mirror_used = who
@@ -1555,6 +1642,8 @@ class Downloader:
 
     def _download_via_browser(self, item, timeout):
         sid = item["id"]
+        self.now = {"id": sid, "title": item.get("title", ""), "artist": item.get("artist", ""),
+                    "source": "osu.ppy.sh", "done": 0, "total": 0, "rate": 0}
         try:
             driver = self._ensure_browser()
         except PermissionError:
